@@ -437,7 +437,11 @@ function Download-File {
     Write-Info ('下载：' + $Url)
 
     if ($script:CurlExe) {
-        $curlArgs = @('-L', '--fail', '--retry', '3', '--retry-delay', '2', '--connect-timeout', '20', '-o', $OutFile)
+        # --connect-timeout 只管「连不上」。被墙的连接经常是连得上、传输阶段被
+        # 掐死——没有停滞检测的话 curl 会永远挂着,重试也永远轮不到。
+        # --speed-time/--speed-limit:30 秒内平均速度低于 1KB/s 视为死链,断掉
+        # 交给下一个通道;大文件慢速下载只要还在动就不受影响。
+        $curlArgs = @('-L', '--fail', '--retry', '3', '--retry-delay', '2', '--connect-timeout', '20', '--speed-limit', '1024', '--speed-time', '30', '-o', $OutFile)
         if ($Proxy) { $curlArgs += @('-x', $Proxy) }
         $curlArgs += $Url
         & $script:CurlExe @curlArgs
@@ -452,22 +456,43 @@ function Download-File {
         Die '配置了 socks 代理，但系统中没有可用的 curl.exe；socks 代理仅在有 curl.exe 时可用。请改用 http/https 代理，或安装 curl。'
     }
 
+    # WebClient.DownloadFile 没有任何超时,被墙的连接会永远挂死。改用
+    # HttpWebRequest + 手动流拷贝:Timeout 管连接/响应头,ReadWriteTimeout 管
+    # 每一次 Read——传输停滞超过 60 秒即抛异常交给上层回退,而不是挂住整个安装。
     $part = $OutFile + '.part'
-    $client = New-Object System.Net.WebClient
+    $resp = $null
+    $inStream = $null
+    $outStream = $null
     try {
-        $client.Headers.Add('User-Agent', 'nbot-installer')
-        if ($Proxy) {
-            $client.Proxy = New-Object System.Net.WebProxy($Proxy)
-        }
         if (Test-Path -LiteralPath $part) { Remove-Item -LiteralPath $part -Force }
-        $client.DownloadFile($Url, $part)
+        $req = [System.Net.WebRequest]::Create($Url)
+        $req.Timeout = 30000
+        $req.ReadWriteTimeout = 60000
+        try { $req.UserAgent = 'nbot-installer' } catch { }
+        if ($Proxy) {
+            $req.Proxy = New-Object System.Net.WebProxy($Proxy)
+        }
+        $resp = $req.GetResponse()
+        $inStream = $resp.GetResponseStream()
+        $outStream = New-Object System.IO.FileStream($part, [System.IO.FileMode]::Create)
+        $buf = New-Object byte[] 65536
+        while ($true) {
+            $n = $inStream.Read($buf, 0, $buf.Length)
+            if ($n -le 0) { break }
+            $outStream.Write($buf, 0, $n)
+        }
+        $outStream.Close()
+        $outStream = $null
         if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force }
         Move-Item -Path $part -Destination $OutFile
     } catch {
+        if ($outStream) { try { $outStream.Close() } catch { } ; $outStream = $null }
         if (Test-Path -LiteralPath $part) { Remove-Item -LiteralPath $part -Force }
         throw
     } finally {
-        $client.Dispose()
+        if ($outStream) { try { $outStream.Close() } catch { } }
+        if ($inStream) { try { $inStream.Close() } catch { } }
+        if ($resp) { try { $resp.Close() } catch { } }
     }
 }
 

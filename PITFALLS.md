@@ -123,3 +123,4 @@
 2. .NET Framework 的 String.Replace 没有带 StringComparison 的三参数重载(.NET Core 才有);两参数版本本来就是 ordinal 区分大小写的,够用。
 3. GitHub Actions 的 run: 块落成临时 .ps1 **不带 BOM**,Windows PowerShell 按 ANSI 读,中文直接解析失败;run: 只写 ASCII,中文放 name:。
 4. 多个代理/会话并行改同一目录时,谁最后落盘谁赢:开工前必须固定基线提交,分工按**文件级**互斥,谁也不许碰别人的文件;被中断的会话留下的半成品要先 git diff 甄别再决定采用或还原。
+5. **curl 没有 --max-time / --speed-time 时,被墙的连接会永远挂死**:`--connect-timeout` 只管「连不上」,而被墙的典型形态是 TCP 连得上、传输阶段被掐——连接超时不触发、`--retry` 永远轮不到,安装流程无限卡住且没有任何报错。加 `--speed-limit 1024 --speed-time 30`(30 秒平均低于 1KB/s 判死)既能斩断挂死又不误伤慢速大文件。WebClient.DownloadFile 同病且无药,要换 HttpWebRequest(Timeout + ReadWriteTimeout)手动流拷贝。这个雷从 v1.0 一直埋到 v1.6 才在一次夜间无人值守安装里炸出来——**直连侥幸成功过≠通道可靠**。
