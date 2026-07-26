@@ -1,0 +1,7 @@
+# Windows-only project: keep CRLF on checkout so cmd/wscript never choke.
+* text=auto eol=crlf
+
+# Binary assets must never be line-ending converted.
+*.ico binary
+*.exe binary
+*.zip binary
