@@ -1001,7 +1001,18 @@ function Get-SnowlumaCred {
 
 function Prompt-Default {
     param($Message, $Default)
-    $answer = Read-Host ($Message + ' [' + $Default + ']')
+    # 与 Confirm-Action 同理:无人值守/非交互环境直接采用默认值,不挂死。
+    if ($env:NBOT_ASSUME_DEFAULTS -eq '1') {
+        Write-Info ($Message + ' -> 无人值守,采用默认值 [' + $Default + ']')
+        return $Default
+    }
+    $answer = $null
+    try {
+        $answer = Read-Host ($Message + ' [' + $Default + ']')
+    } catch {
+        Write-Info ($Message + ' -> 非交互环境,采用默认值 [' + $Default + ']')
+        return $Default
+    }
     if ($null -eq $answer) { return $Default }
     $answer = $answer.Trim()
     if ($answer -eq '') { return $Default }
@@ -1010,8 +1021,23 @@ function Prompt-Default {
 
 function Confirm-Action {
     param($Message, $DefaultYes)
+    # 无人值守(NBOT_ASSUME_DEFAULTS=1,或 -NonInteractive 下 Read-Host 抛异常)
+    # 一律走默认值并把选择写进日志——交互提示在没人的控制台上会永远等下去,
+    # 整条安装流水线跟着挂死,而且没有任何报错。
+    if ($env:NBOT_ASSUME_DEFAULTS -eq '1') {
+        if ($DefaultYes) { $pick = 'Y' } else { $pick = 'N' }
+        Write-Info ($Message + ' -> 无人值守,自动选择默认值 ' + $pick)
+        return [bool]$DefaultYes
+    }
     if ($DefaultYes) { $suffix = '[Y/n]' } else { $suffix = '[y/N]' }
-    $answer = Read-Host ($Message + ' ' + $suffix)
+    $answer = $null
+    try {
+        $answer = Read-Host ($Message + ' ' + $suffix)
+    } catch {
+        if ($DefaultYes) { $pick = 'Y' } else { $pick = 'N' }
+        Write-Info ($Message + ' -> 非交互环境,自动选择默认值 ' + $pick)
+        return [bool]$DefaultYes
+    }
     if ($null -eq $answer) { $answer = '' }
     $answer = $answer.Trim().ToLower()
     if ($answer -eq '') { return [bool]$DefaultYes }
