@@ -32,6 +32,8 @@ jobs:
         shell: powershell
         run: .\build-single-exe.ps1
 
+      # 注意：run: 块里只能写 ASCII。Actions 会把它落成临时 .ps1 且不带 BOM，
+      # Windows PowerShell 按 ANSI 读，中文会变乱码直接解析失败。
       - name: 校验产物能解压且与源码一致
         shell: powershell
         run: |
@@ -39,16 +41,16 @@ jobs:
           $out = Join-Path $env:RUNNER_TEMP 'verify'
           $proc = Start-Process -FilePath .\dist\NBotSetup.exe `
             -ArgumentList @('/extract', $out) -Wait -PassThru
-          if ($proc.ExitCode -ne 0) { throw "解压失败，退出码 $($proc.ExitCode)" }
+          if ($proc.ExitCode -ne 0) { throw "extract failed, exit code $($proc.ExitCode)" }
           $count = @(Get-ChildItem $out -Recurse -File).Count
-          Write-Host "解压出 $count 个文件"
-          if ($count -lt 25) { throw "解压文件数异常：$count" }
+          Write-Host "extracted $count files"
+          if ($count -lt 25) { throw "unexpected file count: $count" }
           foreach ($f in @('lib\common.ps1', 'gui.ps1', 'wizard.ps1', 'install-core.ps1')) {
             $a = (Get-FileHash $f).Hash
             $b = (Get-FileHash (Join-Path $out $f)).Hash
-            if ($a -ne $b) { throw "$f 与源码不一致" }
+            if ($a -ne $b) { throw "$f does not match the source" }
           }
-          Write-Host '产物与源码逐字节一致'
+          Write-Host 'artifact matches sources byte for byte'
 
       - name: 上传安装器
         uses: actions/upload-artifact@v4

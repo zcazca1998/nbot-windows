@@ -55,6 +55,7 @@
 0.7. AstrBot / NapCat 的日志是 UTF-8,`Get-Content` 默认按本地代码页(中文 Windows 为 GBK)解码,中文和 emoji 会变成 `鉁ㄢ湪鉁?` 这类乱码。要用 FileStream(FileShare::ReadWrite,日志正被写入)+ StreamReader(UTF8) 读;控制台输出前把 `[Console]::OutputEncoding` 切成 UTF-8;日志里还有 ANSI 颜色转义(`ESC[32m`),在窗口里显示前要用正则去掉。最省心的做法是像面板那样直接在 GUI 里看日志,绕开控制台代码页。
 0.8. 光给窗口/托盘设图标还不够,exe 文件本身在资源管理器里会是一张空白「未知程序」图,一看就像三无软件。编译时必须用 `csc /win32icon:<.ico>` 把图标嵌进 exe。换了图标后资源管理器可能仍显示缓存的旧图,调 `SHChangeNotify(0x8000000, ...)`(shell32.dll)刷新图标缓存,或让用户 F5。窗口、托盘、任务栏、快捷方式、exe 五处最好共用同一个 .ico,视觉才统一。
 0.9. 内嵌资源与显示的多处编码/BOM 教训汇总:所有 .ps1(含 scratchpad 里的临时脚本)必须存 UTF-8 带 BOM,否则 powershell.exe 按 ANSI 读中文——尤其是脚本里出现中文路径(如删除「nbot 面板.lnk」)时,路径被解成乱码导致 `Test-Path` 假阴性、`Remove-Item` 静默不删还误报「已删除」。凡是脚本里带中文,先确认 BOM。
+0.9.1. 同一个 BOM 坑在 **GitHub Actions** 里会再咬一次:workflow 的 `run:` 块会被落成临时 `.ps1` 执行,而且**不带 BOM**,Windows PowerShell 按 ANSI 读——只要脚本里有中文就变乱码、直接 `The string is missing the terminator` 解析失败。`run:` 块一律只写 ASCII;要中文放到步骤的 `name:`(那是 YAML 字符串,由 runner 显示,不进 PowerShell 解析)。
 0.10. 对**尚未 ShowDialog 的窗体**调 `Close()` 会直接释放它,随后 `ShowDialog()` 抛「无法访问已释放的对象」并崩窗。踩坑场景:给扫码窗加「登录成功自动关窗」,而打开时已经是登录状态 → 窗口还没显示就被关掉 → 崩。两条防线:①判断条件在**建窗之前**先跑一次,满足就别建窗;②真要在回调里关,先判 `$form.Visible`。
 0.11. 渲染测试(把窗口画到屏幕外)抓不到「点了按钮才崩」的问题——那些代码路径只有真实调用才走到。要单独加一个自检模式,在**非提权**子进程里真跑一遍状态刷新和每个对话框的构建(NOSHOW 下不真显示)。这个自检当场抓出过两个必崩 bug:调用了改名后已不存在的函数、以及上面 0.10 的窗体释放。注意自检模式要绕过单实例互斥锁,否则已有面板在跑时它会静默退出、什么都测不到,还伪装成通过。
 1. iexpress 是 GUI 子系统程序:`/N /Q` 静默构建时直接 `&` 调用不会等待,会在 exe 写完前就去检查产物而误判失败;而且构建失败没有任何日志。最终改用「载荷索引 + GZip 压缩 + csc.exe 编译 C# 自解压器」的方案,全程可控、可自测。
