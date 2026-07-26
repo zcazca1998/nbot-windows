@@ -83,7 +83,7 @@ function Start-ConsoleCommand {
     # 默认:安装/更新/诊断这类需要看输出的,结束后停留等待按键。
     param([string]$Command, [string]$Extra, [switch]$Quick)
     # 这些命令会改动计划任务,让任务存在性缓存立即失效,避免面板显示滞后
-    if ('install-all', 'install-astrbot', 'install-napcat', 'repair', 'uninstall',
+    if ('install-all', 'install-astrbot', 'install-napcat', 'install-snowluma', 'repair', 'uninstall',
         'uninstall-quiet', 'autostart-on', 'autostart-off' -contains $Command) {
         Clear-TaskCache
     }
@@ -115,22 +115,21 @@ function Get-AstrPort {
     return $port
 }
 
-function Get-NapPort {
-    $port = Get-Cfg 'NAPCAT_WEBUI_PORT'
-    if (-not $port) { $port = '6099' }
-    return $port
-}
-
 function Test-TaskExists {
     param([string]$Name)
     # 用缓存:每次查任务都要新建 cmd 进程,三个组件就是三次,放在 5 秒一跳的
     # 状态刷新里会明显拖慢 UI(拖窗口发飘)。任务是否存在几乎不变,缓存 60 秒,
     # 安装/修复这类会改任务的操作再主动失效。
+    # 时间戳必须按 key 存,不能用一个全局单值:Update-Status 依次查
+    # AstrBot -> 机器人后端 -> Watchdog,若共用一个时间戳,任何一次 miss 都会
+    # 把它刷成 now,导致排在后面的任务永远在有效期内、再也不会重新查询——
+    # 面板会一直显示「守护中」,即使那个任务早被删掉了。
     if ($null -eq $script:TaskCache) { $script:TaskCache = @{} }
     $now = [DateTime]::UtcNow
-    if ($script:TaskCache.ContainsKey($Name) -and $null -ne $script:TaskCacheTime) {
-        if (($now - $script:TaskCacheTime).TotalSeconds -lt 60) {
-            return [bool]$script:TaskCache[$Name]
+    $entry = $script:TaskCache[$Name]
+    if ($null -ne $entry) {
+        if (($now - $entry['t']).TotalSeconds -lt 60) {
+            return [bool]$entry['v']
         }
     }
 
@@ -147,14 +146,12 @@ function Test-TaskExists {
         # 「拒绝访问」= 任务存在但没权限看;「找不到」才是真的不存在
         if ($text -match 'denied|拒绝') { $exists = $true }
     }
-    $script:TaskCache[$Name] = $exists
-    $script:TaskCacheTime = $now
+    $script:TaskCache[$Name] = @{ 'v' = $exists; 't' = $now }
     return $exists
 }
 
 function Clear-TaskCache {
     $script:TaskCache = @{}
-    $script:TaskCacheTime = $null
 }
 
 function Test-AutostartDisabled {
@@ -165,13 +162,6 @@ function Test-AutostartDisabled {
         $flag = $false
     }
     return $flag
-}
-
-function Restart-OneTask {
-    param([string]$Name)
-    & cmd.exe /c ('schtasks /end /tn "\NBot\' + $Name + '" >nul 2>nul')
-    & cmd.exe /c ('schtasks /run /tn "\NBot\' + $Name + '" >nul 2>nul')
-    Show-Toast ('已请求重启 ' + $Name + '，约 20 秒后状态会刷新。')
 }
 
 function Get-QrCodePath {
@@ -307,31 +297,59 @@ function Show-LogWindow {
 # -----------------------------------------------------------------------------
 
 function Show-UinDialog {
+    # 返回值用哨兵区分:「取消」返回 $null,「确认」返回输入内容(可能是 ''）。
+    # 两者不能用同一个真值判断合并,否则"留空确认"会被当成"取消"。
+    # napcat 后端:Configure-OneBot 写 per-uin 的 onebot11_<uin>.json,QQ 号必填,
+    # 空输入仍视为无效、留在弹窗里重新输入。
+    # snowluma 后端:Configure-OneBot 写的是全局 onebot.json,对所有登录账号
+    # 生效,$Uin 只是"传了就记进 QQ_UIN 备查",可以留空确认——早前强制纯数字、
+    # 不填没有出口,会把"改完端口想重新配置、但还没扫码登录过"的用户卡死。
     $script:UinValue = $null
-    $dlg = New-ThemeWindow '对接 AstrBot' 400 216
-    [void](New-ThemeLabel $dlg 24 60 352 20 '请输入机器人 QQ 号（登录 NapCat 的那个号）：' 9)
+    $script:UinConfirmed = $false
+    $script:UinRequired = -not (Test-SnowLuma)
+
+    $title = '对接 AstrBot'
+    $labelText = '请输入机器人 QQ 号（登录 NapCat 的那个号）：'
+    $hintText = 'OneBot token 会自动生成，无需手动填写。'
+    if (-not $script:UinRequired) {
+        $title = '配置 OneBot 对接'
+        $labelText = '机器人 QQ 号（可选，仅作记录，留空也能对接）：'
+        $hintText = '可留空；仅作记录，全局配置对所有已登录账号生效。'
+    }
+    $dlg = New-ThemeWindow $title 400 216
+    [void](New-ThemeLabel $dlg 24 60 352 20 $labelText 9)
     $existing = Get-Cfg 'QQ_UIN'
     $script:UinBox = New-ThemeTextBox $dlg 24 88 352 $existing
-    $script:UinHint = New-ThemeLabel $dlg 24 118 352 20 'OneBot token 会自动生成，无需手动填写。' 8.5 -ColorName 'TextDim'
+    $script:UinHint = New-ThemeLabel $dlg 24 118 352 20 $hintText 8.5 -ColorName 'TextDim'
 
     [void](New-ThemeButton $dlg 24 152 170 34 '开始对接' 'primary' {
         $text = ''
         try { $text = ([string]$script:UinBox.Text).Trim() } catch { $text = '' }
-        if ($text -match '^\d+$') {
+        $ok = $false
+        if ($text -match '^\d+$') { $ok = $true }
+        elseif ($text -eq '' -and -not $script:UinRequired) { $ok = $true }
+        if ($ok) {
             $script:UinValue = $text
+            $script:UinConfirmed = $true
             $script:UinBox.FindForm().Close()
         } else {
-            $script:UinHint.Text = 'QQ 号必须是纯数字，请重新输入。'
+            if ($script:UinRequired) {
+                $script:UinHint.Text = 'QQ 号必须是纯数字，请重新输入。'
+            } else {
+                $script:UinHint.Text = 'QQ 号必须是纯数字，或留空。'
+            }
             $script:UinHint.ForeColor = (Get-ThemeColor 'Bad')
         }
     })
     [void](New-ThemeButton $dlg 206 152 170 34 '取消' 'ghost' {
         $script:UinValue = $null
+        $script:UinConfirmed = $false
         $script:UinBox.FindForm().Close()
     })
 
     if (-not $script:NoShow) { [void]$dlg.ShowDialog() }
     $dlg.Dispose()
+    if (-not $script:UinConfirmed) { return $null }
     return $script:UinValue
 }
 
@@ -406,38 +424,90 @@ function Show-ResetNapcatDialog {
     $dlg.Dispose()
 }
 
+function Show-ResetSnowlumaDialog {
+    # SnowLuma 的 WebUI 登录是「admin + 密码」,密码哈希存储改不回明文;
+    # 重置 = 删凭据文件重启,SnowLuma 自己生成新的随机初始密码并写进日志。
+    $dlg = New-ThemeWindow '重置 SnowLuma 密码' 420 240
+    [void](New-ThemeLabel $dlg 24 60 372 40 ('重置后 SnowLuma 会重启,并生成一个新的随机初始密码,' +
+        '结果窗口和「登录信息」里都能看到。') 9 -ColorName 'TextDim')
+    $hint = New-ThemeLabel $dlg 24 108 372 20 '当前密码(包括你自己改过的)将立即失效。' 8.5 -ColorName 'TextDim'
+    [void](New-ThemeButton $dlg 24 160 180 36 '确认重置' 'primary' {
+        Start-ConsoleCommand 'reset-snowluma' ''
+        $hint.FindForm().Close()
+    }.GetNewClosure())
+    [void](New-ThemeButton $dlg 216 160 180 36 '取消' 'ghost' { $hint.FindForm().Close() }.GetNewClosure())
+    if (-not $script:NoShow) { [void]$dlg.ShowDialog() }
+    $dlg.Dispose()
+}
+
 function Show-CredWindow {
-    # 只展示「长期可查」的真实凭据:NapCat WebUI token 明文存 webui.json,
-    # 持久有效;AstrBot 密码是哈希存储,首次改密后无法还原,所以这里只给
-    # 地址+账号+重置提示,不摆一个可能已失效的初始密码误导人。
-    $cred = Get-AstrbotCred
-    $token = Get-NapcatToken
-    $aPort = Get-AstrPort
-    $nPort = Get-NapPort
+    if (Test-SnowLuma) {
+        # SnowLuma 后端:两侧的密码都是哈希存储:AstrBot 改过密码后无法回显;
+        # SnowLuma 的初始密码只在日志里出现,且 mustChangePassword 翻 false 后
+        # 同样无法回显。所以这里只展示「当前确实有效」的信息,失效的初始密码
+        # 不摆出来误导人。
+        $cred = Get-AstrbotCred
+        $slCred = Get-SnowlumaCred
+        $aPort = Get-AstrPort
 
-    $dlg = New-ThemeWindow 'nbot 登录信息' 540 440
-    [void](New-ThemeLabel $dlg 20 56 500 18 'NapCat WebUI（Token 长期有效,可随时用这里的值登录）' 9.5 -Bold -ColorName 'Pink')
-    Add-CredRow $dlg 84 '地址' ('http://127.0.0.1:' + $nPort + '/webui') $true
-    $tok = $token
-    if (-not $tok) { $tok = '(未找到 webui.json,可能尚未安装 NapCat)' }
-    Add-CredRow $dlg 114 'Token' $tok ($null -ne $token)
+        $dlg = New-ThemeWindow 'nbot 登录信息' 540 480
+        [void](New-ThemeLabel $dlg 20 56 500 18 'SnowLuma WebUI（密码为哈希存储，只有未改密时才能看到初始密码）' 9.5 -Bold -ColorName 'Pink')
+        Add-CredRow $dlg 84 '地址' (Get-BotWebuiUrl) $true
+        Add-CredRow $dlg 114 '账号' $slCred['user'] $true
+        $slNote = 'SnowLuma 密码为哈希存储,已改过密码后无法回显。忘记密码就点下面「重置 SnowLuma 密码」重新生成。'
+        if ($slCred['found']) {
+            $slNote = 'SnowLuma 初始密码(未改密前每次重启都会换一个新的): ' + $slCred['pass'] + ' —— 登录后请尽快修改;忘记可点下面重置。'
+        }
+        [void](New-ThemeLabel $dlg 20 144 500 34 $slNote 8.5 -ColorName 'TextDim')
 
-    [void](New-ThemeLabel $dlg 20 156 500 18 'AstrBot 管理页' 9.5 -Bold -ColorName 'Pink')
-    Add-CredRow $dlg 184 '地址' ('http://127.0.0.1:' + $aPort + '/') $true
-    Add-CredRow $dlg 214 '账号' $cred['user'] $true
-    $astrNote = 'AstrBot 密码为哈希存储,已改过密码后无法回显。忘记密码就点下面「重置 AstrBot 密码」设个新的。'
-    if ($cred['found']) {
-        $astrNote = 'AstrBot 初始密码(尚未改过,仅首次登录前有效): ' + $cred['pass'] + ' —— 登录后请改;忘记可点下面重置。'
+        [void](New-ThemeLabel $dlg 20 192 500 18 'AstrBot 管理页' 9.5 -Bold -ColorName 'Pink')
+        Add-CredRow $dlg 220 '地址' ('http://127.0.0.1:' + $aPort + '/') $true
+        Add-CredRow $dlg 250 '账号' $cred['user'] $true
+        $astrNote = 'AstrBot 密码为哈希存储,已改过密码后无法回显。忘记密码就点下面「重置 AstrBot 密码」设个新的。'
+        if ($cred['found']) {
+            $astrNote = 'AstrBot 初始密码(尚未改过,仅首次登录前有效): ' + $cred['pass'] + ' —— 登录后请改;忘记可点下面重置。'
+        }
+        [void](New-ThemeLabel $dlg 20 280 500 34 $astrNote 8.5 -ColorName 'TextDim')
+
+        # 重置行:忘记密码就在这里改
+        [void](New-ThemeButton $dlg 20 328 244 34 '重置 SnowLuma 密码' 'accent' { Show-ResetSnowlumaDialog })
+        [void](New-ThemeButton $dlg 276 328 244 34 '重置 AstrBot 密码' 'accent' { Show-ResetAstrbotDialog })
+
+        [void](New-ThemeButton $dlg 20 384 150 34 '打开 SnowLuma' 'primary' { Start-Process (Get-BotWebuiUrl) })
+        [void](New-ThemeButton $dlg 184 384 150 34 '打开 AstrBot' 'accent' { Start-Process ('http://127.0.0.1:' + (Get-AstrPort) + '/') })
+        [void](New-ThemeButton $dlg 356 384 150 34 '关闭' 'ghost' { $dlg.Close() }.GetNewClosure())
+    } else {
+        # NapCat 后端:只展示「长期可查」的真实凭据:NapCat WebUI token 明文存
+        # webui.json,持久有效;AstrBot 密码是哈希存储,首次改密后无法还原,所以
+        # 这里只给地址+账号+重置提示,不摆一个可能已失效的初始密码误导人。
+        $cred = Get-AstrbotCred
+        $token = Get-NapcatToken
+        $aPort = Get-AstrPort
+
+        $dlg = New-ThemeWindow 'nbot 登录信息' 540 440
+        [void](New-ThemeLabel $dlg 20 56 500 18 'NapCat WebUI（Token 长期有效,可随时用这里的值登录）' 9.5 -Bold -ColorName 'Pink')
+        Add-CredRow $dlg 84 '地址' (Get-BotWebuiUrl) $true
+        $tok = $token
+        if (-not $tok) { $tok = '(未找到 webui.json,可能尚未安装 NapCat)' }
+        Add-CredRow $dlg 114 'Token' $tok ($null -ne $token)
+
+        [void](New-ThemeLabel $dlg 20 156 500 18 'AstrBot 管理页' 9.5 -Bold -ColorName 'Pink')
+        Add-CredRow $dlg 184 '地址' ('http://127.0.0.1:' + $aPort + '/') $true
+        Add-CredRow $dlg 214 '账号' $cred['user'] $true
+        $astrNote = 'AstrBot 密码为哈希存储,已改过密码后无法回显。忘记密码就点下面「重置 AstrBot 密码」设个新的。'
+        if ($cred['found']) {
+            $astrNote = 'AstrBot 初始密码(尚未改过,仅首次登录前有效): ' + $cred['pass'] + ' —— 登录后请改;忘记可点下面重置。'
+        }
+        [void](New-ThemeLabel $dlg 20 244 500 34 $astrNote 8.5 -ColorName 'TextDim')
+
+        # 重置行:忘记密码/token 就在这里改
+        [void](New-ThemeButton $dlg 20 288 244 34 '重置 AstrBot 密码' 'accent' { Show-ResetAstrbotDialog })
+        [void](New-ThemeButton $dlg 276 288 244 34 '重置 NapCat Token' 'accent' { Show-ResetNapcatDialog })
+
+        [void](New-ThemeButton $dlg 20 344 150 34 '打开 AstrBot' 'primary' { Start-Process ('http://127.0.0.1:' + (Get-AstrPort) + '/') })
+        [void](New-ThemeButton $dlg 184 344 150 34 '打开 NapCat' 'accent' { Start-Process (Get-BotWebuiUrl) })
+        [void](New-ThemeButton $dlg 356 344 150 34 '关闭' 'ghost' { $dlg.Close() }.GetNewClosure())
     }
-    [void](New-ThemeLabel $dlg 20 244 500 34 $astrNote 8.5 -ColorName 'TextDim')
-
-    # 重置行:忘记密码/token 就在这里改
-    [void](New-ThemeButton $dlg 20 288 244 34 '重置 AstrBot 密码' 'accent' { Show-ResetAstrbotDialog })
-    [void](New-ThemeButton $dlg 276 288 244 34 '重置 NapCat Token' 'accent' { Show-ResetNapcatDialog })
-
-    [void](New-ThemeButton $dlg 20 344 150 34 '打开 AstrBot' 'primary' { Start-Process ('http://127.0.0.1:' + (Get-AstrPort) + '/') })
-    [void](New-ThemeButton $dlg 184 344 150 34 '打开 NapCat' 'accent' { Start-Process ('http://127.0.0.1:' + (Get-NapPort) + '/webui') })
-    [void](New-ThemeButton $dlg 356 344 150 34 '关闭' 'ghost' { $dlg.Close() }.GetNewClosure())
 
     if (-not $script:NoShow) { [void]$dlg.ShowDialog() }
     $dlg.Dispose()
@@ -469,10 +539,11 @@ function Show-UninstallDialog {
 
     $card = New-ThemeCard $dlg 20 96 440 176 '同时删除哪些数据?(默认全部保留)'
     $aRoot = Get-Cfg 'ASTRBOT_ROOT'
-    $nRoot = Get-Cfg 'NAPCAT_ROOT'
+    $nRoot = Get-BotRoot
+    $botName = Get-BotName
     $script:UnChkAstr = New-UnCheckBox $card 16 34 408 ('AstrBot 数据目录 ' + $aRoot)
-    [void](New-ThemeLabel $card 32 56 392 16 '机器人配置、插件、聊天数据、NapCat 载荷都在这里' 8 -ColorName 'TextDim')
-    $script:UnChkNap = New-UnCheckBox $card 16 78 408 ('NapCat 数据目录 ' + $nRoot)
+    [void](New-ThemeLabel $card 32 56 392 16 ('机器人配置、插件、聊天数据、' + $botName + ' 载荷都在这里') 8 -ColorName 'TextDim')
+    $script:UnChkNap = New-UnCheckBox $card 16 78 408 ($botName + ' 数据目录 ' + $nRoot)
     [void](New-ThemeLabel $card 32 100 392 16 'OneBot / WebUI 配置与日志(QQ 登录态不在这里,不受影响)' 8 -ColorName 'TextDim')
     $script:UnChkProg = New-UnCheckBox $card 16 122 408 '安装器与运行数据 %ProgramData%\nbot'
     [void](New-ThemeLabel $card 32 144 392 16 '控制脚本、看门狗日志、状态记录;删除后本面板随之失效' 8 -ColorName 'TextDim')
@@ -482,7 +553,7 @@ function Show-UninstallDialog {
     [void](New-ThemeButton $dlg 24 330 200 36 '开始卸载' 'danger' {
         $flags = @()
         if ($script:UnChkAstr.Checked) { $flags += 'data' }
-        if ($script:UnChkNap.Checked) { $flags += 'napcat' }
+        if ($script:UnChkNap.Checked) { $flags += (Get-BotMarker) }
         if ($script:UnChkProg.Checked) { $flags += 'programdata' }
         $flagText = ($flags -join ',')
         $summary = '将执行卸载:移除任务/命令/快捷方式/托盘自启'
@@ -555,12 +626,41 @@ function Update-QrImage {
     }
 }
 
+function Update-QrStatus {
+    # SnowLuma 不提供网页二维码图片,这里只做「登录成功了没」的轮询：
+    # 成功了就没必要再等,自动关窗。
+    if (-not (Test-QqLoggedIn)) { return }
+    $script:QrLoggedIn = $true
+    $script:QrTip.Text = '登录成功!窗口即将自动关闭。'
+    $script:QrTip.ForeColor = (Get-ThemeColor 'Ok')
+    # 只有「已经显示出来」的窗口才能 Close:对尚未 ShowDialog 的窗体调
+    # Close() 会直接释放它,随后 ShowDialog 就抛「无法访问已释放的对象」。
+    if ($null -ne $script:QrForm -and $script:QrForm.Visible) {
+        try { $script:QrForm.Close() } catch { }
+    }
+}
+
 function Test-QqLoggedIn {
-    # 判断 QQ 是否已登录:NapCat 登录成功后会开 OneBot HTTP 端口(未登录时
-    # 不监听),这是最干净的信号;端口没配就退回看日志里的登录成功标记。
+    # 判断 QQ 是否已登录:登录成功后后端会开 OneBot HTTP 端口(未登录时
+    # 不监听),这是最干净的信号;端口没配就退回看日志里的登录成功标记
+    # (两个后端的日志格式不同,按后端分支)。
     $httpPort = Get-Cfg 'ONEBOT_HTTP_PORT'
     if ($httpPort) {
         if (Test-TcpOk '127.0.0.1' $httpPort 400) { return $true }
+    }
+    if (Test-SnowLuma) {
+        try {
+            # SnowLuma 的 OneBot 适配器是按账号(per-uin)实例化的,没有账号
+            # 登录时不会有任何 [OneBot] 行,所以下面两条一旦出现即可确认已登录
+            # (实测到的真实日志格式)。
+            $log = Join-Path (Get-Cfg 'SL_ROOT') 'logs\snowluma.log'
+            $lines = Get-TailLines $log 40
+            foreach ($line in $lines) {
+                if ($line -match '\[Hook\] login detected') { return $true }
+                if ($line -match 'session started: UIN=\d+') { return $true }
+            }
+        } catch { }
+        return $false
     }
     try {
         $log = Join-Path (Get-Cfg 'NAPCAT_ROOT') 'logs\napcat.log'
@@ -574,12 +674,8 @@ function Test-QqLoggedIn {
     return $false
 }
 
-function Show-QrWindow {
-    # 已经登录就别开窗了:既省事,也避免「窗口没显示就被关掉」的释放问题。
-    if (Test-QqLoggedIn) {
-        Show-Toast 'QQ 已经登录,无需扫码。要换账号请先在 QQ 里退出登录。'
-        return
-    }
+function Show-QrWindowNapcat {
+    # NapCat 后端:展示 NapCat 生成的二维码图片,3 秒一轮询自动换新码。
     $script:QrStamp = ''
     $script:QrLoggedIn = $false
     $qrForm = New-ThemeWindow '扫码登录 QQ' 400 560
@@ -636,6 +732,59 @@ function Show-QrWindow {
     $qrForm.Dispose()
 }
 
+function Show-QrWindowSnowluma {
+    # SnowLuma 不像 NapCat 那样在 WebUI 里出二维码图片：它只负责注入 QQ,
+    # 扫码/确认登录全程都在 QQ 客户端窗口里完成。这里只负责把 QQ 窗口带到
+    # 前台(qqlogin 命令做这件事),然后轮询登录结果。
+    $script:QrLoggedIn = $false
+    $qrForm = New-ThemeWindow 'QQ 扫码登录' 400 260
+    $script:QrForm = $qrForm
+
+    $script:QrTip = New-ThemeLabel $qrForm 24 56 352 100 ('SnowLuma 不提供网页二维码,扫码和确认都在 QQ 客户端窗口里完成。' +
+        '点击下方按钮把 QQ 窗口带到前台;本窗口每 3 秒自动检测一次登录结果,' +
+        '成功后会自动关闭。') 9 -ColorName 'TextDim'
+
+    [void](New-ThemeButton $qrForm 24 172 170 34 '打开 QQ 登录' 'primary' {
+        Start-ConsoleCommand 'qqlogin'
+    })
+    [void](New-ThemeButton $qrForm 206 172 170 34 '关闭' 'ghost' { $qrForm.Close() }.GetNewClosure())
+
+    $script:QrTimer = New-Object System.Windows.Forms.Timer
+    $script:QrTimer.Interval = 3000
+    $script:QrTimer.Add_Tick({ Update-QrStatus })
+
+    $qrForm.Add_FormClosed({
+        if ($null -ne $script:QrTimer) {
+            $script:QrTimer.Stop()
+            $script:QrTimer.Dispose()
+            $script:QrTimer = $null
+        }
+        $script:QrForm = $null
+        if ($script:QrLoggedIn) {
+            Show-Toast 'QQ 已登录成功。下一步:点「配置 OneBot 对接」即可完成对接(QQ 号可留空)。'
+        }
+    })
+
+    if (-not $script:NoShow) {
+        $script:QrTimer.Start()
+        [void]$qrForm.ShowDialog()
+    }
+    $qrForm.Dispose()
+}
+
+function Show-QrWindow {
+    # 已经登录就别开窗了:既省事,也避免「窗口没显示就被关掉」的释放问题。
+    if (Test-QqLoggedIn) {
+        Show-Toast 'QQ 已经登录,无需扫码。要换账号请先在 QQ 里退出登录。'
+        return
+    }
+    if (Test-SnowLuma) {
+        Show-QrWindowSnowluma
+    } else {
+        Show-QrWindowNapcat
+    }
+}
+
 # -----------------------------------------------------------------------------
 # 状态刷新
 # -----------------------------------------------------------------------------
@@ -656,7 +805,7 @@ function Update-AutostartButton {
 
 function Update-Status {
     $astrPort = Get-AstrPort
-    $napPort = Get-NapPort
+    $napPort = Get-BotWebuiPort
     $running = $false
 
     # 本机端口:开着就立刻回,没开也几乎立刻拒绝;超时给 200ms 足够,
@@ -675,16 +824,20 @@ function Update-Status {
         Set-ThemeStatusRow $script:RowNap '未运行' 'Bad'
     }
 
+    # QQ 行:napcat 模型下 QQ 是被拉起的孙进程,「QQ 在跑」约等于「这套在跑」,
+    # 计入 $running;但 SnowLuma 是注入型的,QQ 是用户自己的聊天软件,跟 nbot
+    # 死活无关——用户平时开着 QQ 聊天、两个服务全停时,不能让「启动全部/停止
+    # 全部」按钮的高亮被 QQ 这一行带偏,所以 snowluma 下只展示状态,不参与判定。
     $qq = Get-Process -Name QQ -ErrorAction SilentlyContinue
     if ($null -ne $qq) {
         Set-ThemeStatusRow $script:RowQQ '运行中' 'Ok'
-        $running = $true
+        if (-not (Test-SnowLuma)) { $running = $true }
     } else {
         Set-ThemeStatusRow $script:RowQQ '未运行' 'Bad'
     }
     $script:AnyRunning = $running
 
-    $tasksOk = (Test-TaskExists 'AstrBot') -and (Test-TaskExists 'NapCat') -and (Test-TaskExists 'Watchdog')
+    $tasksOk = (Test-TaskExists 'AstrBot') -and (Test-TaskExists (Get-BotName)) -and (Test-TaskExists 'Watchdog')
     $autoOff = Test-AutostartDisabled
     if ($tasksOk -and $autoOff) {
         Set-ThemeStatusRow $script:RowTask '自启已关闭' 'Warn'
@@ -709,7 +862,7 @@ $script:MainForm = New-ThemeWindow 'nbot 控制面板' 640 600 -WithMinimize
 
 $cardStatus = New-ThemeCard $script:MainForm 16 52 608 128 '运行状态'
 $script:RowAstr = New-ThemeStatusRow $cardStatus 16 34 78 'AstrBot'
-$script:RowNap = New-ThemeStatusRow $cardStatus 16 56 78 'NapCat'
+$script:RowNap = New-ThemeStatusRow $cardStatus 16 56 78 (Get-BotName)
 $script:RowQQ = New-ThemeStatusRow $cardStatus 16 78 78 'QQ'
 $script:RowTask = New-ThemeStatusRow $cardStatus 16 100 78 '计划任务'
 $script:LblTime = New-ThemeLabel $cardStatus 420 102 174 16 '刷新于 --:--:--' 8 -ColorName 'TextDim'
@@ -724,15 +877,21 @@ $cardQuick = New-ThemeCard $script:MainForm 16 188 608 116 '快捷操作'
 [void](New-ThemeButton $cardQuick 211 36 186 32 'QQ 扫码登录' 'primary' {
     Show-QrWindow
 })
-[void](New-ThemeButton $cardQuick 408 36 186 32 '对接 AstrBot' 'accent' {
+# napcat 下对接必填 QQ 号,按钮沿用「对接 AstrBot」;snowluma 写全局配置,
+# QQ 号可留空,按钮叫「配置 OneBot 对接」更贴切。
+$script:OnebotBtnText = '对接 AstrBot'
+if (Test-SnowLuma) { $script:OnebotBtnText = '配置 OneBot 对接' }
+[void](New-ThemeButton $cardQuick 408 36 186 32 $script:OnebotBtnText 'accent' {
     $uin = Show-UinDialog
-    if ($uin) { Start-ConsoleCommand 'configure-onebot' $uin }
+    # $null = 用户取消;'' = 确认对接但留空 QQ 号——两者不能用同一个真值
+    # 判断合并,否则"留空确认"会被当成"取消"处理,按钮变空操作。
+    if ($null -ne $uin) { Start-ConsoleCommand 'configure-onebot' $uin }
 })
 [void](New-ThemeButton $cardQuick 14 74 186 32 'AstrBot 管理页' 'ghost' {
     Start-Process ('http://127.0.0.1:' + (Get-AstrPort) + '/')
 })
-[void](New-ThemeButton $cardQuick 211 74 186 32 'NapCat 管理页' 'ghost' {
-    Start-Process ('http://127.0.0.1:' + (Get-NapPort) + '/webui')
+[void](New-ThemeButton $cardQuick 211 74 186 32 ((Get-BotName) + ' 管理页') 'ghost' {
+    Start-Process (Get-BotWebuiUrl)
 })
 [void](New-ThemeButton $cardQuick 408 74 186 32 '登录信息' 'accent' {
     Show-CredWindow
@@ -760,10 +919,14 @@ $script:BtnAuto = New-ThemeButton $cardSvc 14 74 186 32 '关闭开机自启' 'gh
     }
 }
 [void](New-ThemeButton $cardSvc 211 74 186 32 '单独重启 AstrBot' 'ghost' {
-    Restart-OneTask 'AstrBot'
+    # 任务链是 wscript -> bat -> 解释器,schtasks /End 收不到孙进程,必须走
+    # install-core.ps1 的 restart-astrbot(它调 Restart-BotTask,按命令行
+    # 精确终止孙进程)。这里不能自己复制一份进程终止逻辑——那需要 WMI
+    # 命令行匹配,跑在 UI 线程上会卡顿(PITFALLS 记过这个坑)。
+    Start-ConsoleCommand 'restart-astrbot' '' -Quick
 })
-[void](New-ThemeButton $cardSvc 408 74 186 32 '单独重启 NapCat' 'ghost' {
-    Restart-OneTask 'NapCat'
+[void](New-ThemeButton $cardSvc 408 74 186 32 ('单独重启 ' + (Get-BotName)) 'ghost' {
+    Start-ConsoleCommand 'restart-bot' '' -Quick
 })
 
 function Set-ButtonKind {
@@ -794,8 +957,8 @@ $cardLog = New-ThemeCard $script:MainForm 16 436 608 116 '日志与维护'
 [void](New-ThemeButton $cardLog 14 36 139 32 'AstrBot 日志' 'ghost' {
     Show-LogWindow 'AstrBot 日志' (Join-Path (Get-Cfg 'ASTRBOT_ROOT') 'logs\astrbot.log')
 })
-[void](New-ThemeButton $cardLog 161 36 139 32 'NapCat 日志' 'ghost' {
-    Show-LogWindow 'NapCat 日志' (Join-Path (Get-Cfg 'NAPCAT_ROOT') 'logs\napcat.log')
+[void](New-ThemeButton $cardLog 161 36 139 32 ((Get-BotName) + ' 日志') 'ghost' {
+    Show-LogWindow ((Get-BotName) + ' 日志') (Get-BotLogFile)
 })
 [void](New-ThemeButton $cardLog 308 36 139 32 '守护日志' 'ghost' {
     Show-LogWindow '守护日志' (Join-Path (Get-NBotLogDir) 'watchdog.log')
@@ -806,8 +969,8 @@ $cardLog = New-ThemeCard $script:MainForm 16 436 608 116 '日志与维护'
 [void](New-ThemeButton $cardLog 14 74 186 32 '安装/更新 AstrBot' 'ghost' {
     Start-ConsoleCommand 'install-astrbot'
 })
-[void](New-ThemeButton $cardLog 211 74 186 32 '安装/更新 NapCat' 'ghost' {
-    Start-ConsoleCommand 'install-napcat'
+[void](New-ThemeButton $cardLog 211 74 186 32 ('安装/更新 ' + (Get-BotName)) 'ghost' {
+    Start-ConsoleCommand ('install-' + (Get-BotMarker))
 })
 [void](New-ThemeButton $cardLog 408 74 186 32 '卸载' 'danger' { Show-UninstallDialog })
 
@@ -896,8 +1059,8 @@ $miAstrWeb.Add_Click({ Start-Process ('http://127.0.0.1:' + (Get-AstrPort) + '/'
 [void]$trayMenu.MenuItems.Add($miAstrWeb)
 
 $miNapWeb = New-Object System.Windows.Forms.MenuItem
-$miNapWeb.Text = 'NapCat 管理页'
-$miNapWeb.Add_Click({ Start-Process ('http://127.0.0.1:' + (Get-NapPort) + '/webui') })
+$miNapWeb.Text = (Get-BotName) + ' 管理页'
+$miNapWeb.Add_Click({ Start-Process (Get-BotWebuiUrl) })
 [void]$trayMenu.MenuItems.Add($miNapWeb)
 
 $miSep = New-Object System.Windows.Forms.MenuItem
@@ -1016,12 +1179,31 @@ if ($env:NBOT_GUI_SELFTEST -eq '1') {
         # 逐个构建对话框:NOSHOW 下不会真的 ShowDialog,但会跑完窗体构建与
         # 初始数据加载(读日志/配置/探测登录),能抓到「窗体已释放」「空引用」
         # 这类只在真实调用时才暴露的问题。
+        # 扫码窗不走 Show-QrWindow 派发:它在「已登录」时会直接 return,
+        # 窗体构建代码就没被测到,这里必须直接构建具体后端的窗体。
         Show-CredWindow
-        Show-QrWindow
+        if (Test-SnowLuma) { Show-QrWindowSnowluma } else { Show-QrWindowNapcat }
         Show-UninstallDialog
         Show-ResetAstrbotDialog
         Show-ResetNapcatDialog
+        Show-ResetSnowlumaDialog
         Show-LogWindow '自检日志' (Join-Path (Get-NBotLogDir) 'watchdog.log')
+        # 双后端全覆盖:临时把 BOT_BACKEND 切成另一个值,把按后端分支的窗体
+        # (扫码窗/凭据窗/重置窗/卸载窗)再构建一遍,保证两条分支的构建代码都
+        # 被真实执行过;结束后恢复原值。
+        $origBackend = [string]$script:Cfg['BOT_BACKEND']
+        $otherBackend = 'snowluma'
+        if (Test-SnowLuma) { $otherBackend = 'napcat' }
+        $script:Cfg['BOT_BACKEND'] = $otherBackend
+        try {
+            Show-CredWindow
+            if (Test-SnowLuma) { Show-QrWindowSnowluma } else { Show-QrWindowNapcat }
+            Show-ResetNapcatDialog
+            Show-ResetSnowlumaDialog
+            Show-UninstallDialog
+        } finally {
+            $script:Cfg['BOT_BACKEND'] = $origBackend
+        }
         Write-Host 'STATUS OK'
         exit 0
     } catch {

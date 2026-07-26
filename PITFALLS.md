@@ -95,3 +95,31 @@
 1. QQ 掉线只自动拉起一次（标记文件防循环）：反复重启会不停弹登录窗口、频繁触发风控甚至冻结；再次掉线一律等人工 qqlogin。
 2. 更新 QQ（卸载旧版装新版）不会动登录态——登录数据在 Documents\Tencent Files 下，与安装目录分离；但清理脚本绝不能碰这个目录。
 3. Watchdog 的假死判定必须是「进程在 + WebUI 连续 3 次无响应」，启动宽限期内（AstrBot 120 秒、NapCat 90 秒）不判定；否则冷启动慢一点就被误杀，等同变相反复登录。
+
+## SnowLuma 后端专属(双后端合并后新增,全部来自变种实测)
+
+1. **重启 SnowLuma 不需要杀 QQ——这一条与 NapCat 的结论恰好相反,是双后端仓库里最容易抄错的地方。**
+   NapCat 自己就是 QQ 进程(hook 随启动器注入在里面),重启必须连 QQ 进程树一起杀,否则旧 QQ 占着登录态,新实例被「已登录无法重复登录」挡住;
+   SnowLuma 的 hook 是运行期注入的,和 SnowLuma 的 node 进程没有绑定关系——杀掉 node,hook 留在 QQ 里继续跑,新实例起来后经命名管道(mojo.<pid>.control)直接重连,登录态不受影响。
+   照抄 NapCat 逻辑顺手杀 QQ 纯属负优化,还多一次登录等待和异常退出记录。
+2. **SnowLuma 不启动 QQ**,它只是独立 node 进程,轮询发现已在跑的 QQ.exe 再注入。启动脚本必须自己探测 QQ 不在则用配置里的 QQ_EXE 拉起,否则 SnowLuma 永远等在轮询循环里,WebUI 起来了但对接是空的。QQ_EXE 要在安装和修复时探测落盘。
+3. 看门狗发现 QQ 消失时**不能从 SYSTEM 会话 Start-Process 起 QQ**(GUI 进 Session 0 没桌面),只能重跑 ONLOGON 的后端任务让启动脚本在用户会话里拉;重跑前先按命令行杀掉自家 node,否则新旧实例撞 WebUI 端口。
+4. `\NBot\SnowLuma` 任务链路是 wscript → bat → node,`schtasks /End` 只能带走 wscript,**node 是孙进程收不掉**,必须显式按命令行终止。
+5. 识别「自己的 node」不能只按进程名(用户可能跑着别的 Node 程序):启动脚本故意用**绝对路径**起 index.mjs,让载荷路径出现在命令行里,看门狗按「node* + index.mjs + 载荷路径」三重匹配;配置读不到载荷路径时**宁可拒绝守护也不降级匹配**,否则会误杀用户的 Vite/Next 进程。
+6. SnowLuma 官方**只发 win-x64**:native 注入模块必须与 QQ 同架构,arm64 上解压、node、WebUI 全正常,只在注入命名管道那步失败,位置极具迷惑性。装机前置检查直接拦 arm64,且必须排在装 QQ 之前。
+7. Release 资产完整版(win-x64.zip,自带 node.exe)与 lite 版(win-x64-lite.zip,要系统 Node 22+)前缀相同,匹配正则必须让完整版优先命中。
+8. **WebUI 端口被占时 SnowLuma 会自己漂到下一个空闲端口**,只留一条 WARN 日志,不崩不报错。后果:①别的程序占了端口→实际跑在 5100 而探测 5099,永远「未运行」→反复重启死循环(所以假死重启必须有滚动窗口上限);②旧实例没死透就拉新的→健康检查连上的是旧实例,升级被误报成功。重启前必须确认旧 node 真退出;排查状态异常先搜日志里的 `is in use, using`。
+9. EULA/隐私未同意时 WebUI 面板锁定但**端口照样监听**:健康检查只能用纯 TCP 连通性判活,不能解析 HTTP 内容。安装器绝不替用户同意协议。
+10. OneBot 配置字段名与 NapCat 完全不同,且 SnowLuma `rejectUnknownKeys`——多写一个 NapCat 时代的字段直接拒绝加载而不是忽略:network→networks、websocketClients→wsClients、token→accessToken、enable→enabled、messagePostFormat→messageFormat、reconnectInterval(30000)→reconnectIntervalMs(5000)、enableWebsocket→enableWebSocket(大写 S);httpServers/wsServers 缺省 host 是 0.0.0.0,必须显式写。JSON 模板必须整块按后端分支,静态检查有专项门禁。
+11. SnowLuma 首次为某账号加载配置会写 per-uin 快照(onebot_<uin>.json)盖过全局配置,改全局配置时要把快照删掉才生效;首启前主配置没有 onebot.json 时要先写一份四个空数组的安全默认,避免内置默认在 0.0.0.0:3000/3001 开无鉴权端口。
+12. 密码是 scrypt 哈希,重置只能删 webui.json 让它重新生成,不能像 NapCat 那样改明文 token;webui.json 主目录和载荷**两处都有副本**(双向同步的一部分),只删一处会被 xcopy 盖回来,必须两处都删→停任务→重启→等端口→从日志**新增部分**取新密码(未改密前每次重启都换新的,取最后一条)。
+13. `SNOWLUMA_*` 配置键是刻意与 SnowLuma 自身支持的环境变量同名的,启动脚本把 conf 逐行 set 成环境变量、SnowLuma 启动即采纳;新增这类键之前必须确认 SnowLuma 真支持同名变量,否则做出来的是设置了却无效、自己骗自己的配置项。
+14. 升级换载荷时除了 config 单层回收,还要**递归**回收 data\<uin>\(账号 SQLite 库在载荷里);回收前先停任务并杀 node,否则拷到打开中的库。官方 zip 不含 config 目录(NapCat 包含),同步前必须先建目录。
+15. SnowLuma 与 QQ 是**分开守护的两个目标**:QQ 在但 SnowLuma 死(bot 离线没人管)、SnowLuma 在但 QQ 没了(没东西可注入)是两种都要能识别的故障,按 NapCat「只看一个进程」的思路会漏一半。
+
+## 多代理/移植脚本的坑
+
+1. PowerShell 哈希字面量的键**不区分大小写**:@{'napcat'=..;'NAPCAT'=..} 是 duplicate key 解析错误;要大小写变体就用有序键值对数组。
+2. .NET Framework 的 String.Replace 没有带 StringComparison 的三参数重载(.NET Core 才有);两参数版本本来就是 ordinal 区分大小写的,够用。
+3. GitHub Actions 的 run: 块落成临时 .ps1 **不带 BOM**,Windows PowerShell 按 ANSI 读,中文直接解析失败;run: 只写 ASCII,中文放 name:。
+4. 多个代理/会话并行改同一目录时,谁最后落盘谁赢:开工前必须固定基线提交,分工按**文件级**互斥,谁也不许碰别人的文件;被中断的会话留下的半成品要先 git diff 甄别再决定采用或还原。

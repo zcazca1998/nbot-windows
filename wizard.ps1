@@ -3,9 +3,10 @@
 # 二次元风格图形安装向导（WinForms + lib\theme.ps1 组件库）。
 # 由 setup.bat 以管理员身份、-STA 模式启动；用户全程点鼠标即可完成安装。
 # 三个步骤放在同一个窗口里，用页面（Panel）切换实现：
-#   第 1 页 配置（安装位置 / 网络与端口）
+#   第 1 页 配置（机器人后端 / 安装位置 / 网络与端口 / 协议同意）
 #   第 2 页 安装（实时日志 + 走马灯进度条）
 #   第 3 页 完成（管理页地址与后续操作按钮）
+# 机器人后端二选一：NapCat（默认）或 SnowLuma，协议同意卡片仅 SnowLuma 时显示。
 # 兼容范围：Windows 7 SP1 - Windows 11（PowerShell 2.0 + .NET 2.0 WinForms）。
 # 设置环境变量 NBOT_GUI_NOSHOW=1 时只构建窗体不显示、不安装（供自动化测试）。
 # 本文件必须保存为带 BOM 的 UTF-8，否则旧版 PowerShell 按 ANSI 读取会乱码。
@@ -75,6 +76,17 @@ function Test-PortValue {
     return ($number -ge 1 -and $number -le 65535)
 }
 
+function Test-WizSnowluma {
+    # 向导内的后端选择以第 1 页单选按钮为准（不读 Cfg——Cfg 里的 BOT_BACKEND
+    # 只在提交时写入）。控件尚未建好时按默认 napcat 处理。
+    return ($null -ne $script:RadSnow -and $script:RadSnow.Checked)
+}
+
+function Get-WizBotName {
+    if (Test-WizSnowluma) { return 'SnowLuma' }
+    return 'NapCat'
+}
+
 function Get-DefaultInstallRoot {
     # 已真实装过(配置文件存在)且 ASTRBOT_ROOT 形如 <root>\AstrBot、且 <root>
     # 不是裸盘符时,沿用旧根;否则选可用空间最大的固定磁盘,默认 <盘>\nbot。
@@ -142,7 +154,7 @@ function Get-ControlCount {
 # 主窗体与步骤指示
 # -----------------------------------------------------------------------------
 
-$script:Form = New-ThemeWindow 'nbot 安装向导' 680 620 -WithMinimize
+$script:Form = New-ThemeWindow 'nbot 安装向导' 680 800 -WithMinimize
 
 $script:StepLabels = @()
 $script:StepLabels += (New-ThemeLabel $script:Form 22 52 160 22 '① 配置' 10 -Bold 'Pink')
@@ -150,7 +162,7 @@ $script:StepLabels += (New-ThemeLabel $script:Form 188 52 160 22 '② 安装' 10
 $script:StepLabels += (New-ThemeLabel $script:Form 354 52 160 22 '③ 完成' 10 -Bold 'TextDim')
 
 $script:Page1 = New-Object System.Windows.Forms.Panel
-$script:Page1.SetBounds(0, 80, 680, 530)
+$script:Page1.SetBounds(0, 80, 680, 710)
 $script:Page1.BackColor = [System.Drawing.Color]::Transparent
 $script:Form.Controls.Add($script:Page1)
 
@@ -185,7 +197,34 @@ function Show-Page {
 # 第 1 页：配置
 # =============================================================================
 
-$cardPath = New-ThemeCard $script:Page1 20 8 640 186 '安装位置'
+# --- 机器人后端（二选一,默认 NapCat）----------------------------------------
+
+$cardBackend = New-ThemeCard $script:Page1 20 8 640 62 '机器人后端'
+
+$script:RadNap = New-Object System.Windows.Forms.RadioButton
+$script:RadNap.SetBounds(14, 32, 296, 20)
+$script:RadNap.Text = 'NapCat（推荐，自动扫码窗）'
+$script:RadNap.Checked = $true
+$script:RadNap.BackColor = Get-ThemeColor 'Card'
+$script:RadNap.ForeColor = Get-ThemeColor 'Text'
+$script:RadNap.Font = (New-ThemeFont 9)
+$cardBackend.Controls.Add($script:RadNap)
+
+$script:RadSnow = New-Object System.Windows.Forms.RadioButton
+$script:RadSnow.SetBounds(324, 32, 300, 20)
+$script:RadSnow.Text = 'SnowLuma（注入式，不重启 QQ）'
+$script:RadSnow.Checked = $false
+$script:RadSnow.BackColor = Get-ThemeColor 'Card'
+$script:RadSnow.ForeColor = Get-ThemeColor 'Text'
+$script:RadSnow.Font = (New-ThemeFont 9)
+$cardBackend.Controls.Add($script:RadSnow)
+
+# 重跑向导时沿用上次配置里的后端选择（默认仍是 napcat）
+if (Test-SnowLuma) { $script:RadSnow.Checked = $true }
+
+# --- 安装位置 -----------------------------------------------------------------
+
+$cardPath = New-ThemeCard $script:Page1 20 78 640 186 '安装位置'
 
 # 只选一个安装根目录,三个程序自动分类放在它下面的子文件夹里。
 [void](New-ThemeLabel $cardPath 14 38 90 20 '安装根目录' 9 'TextDim')
@@ -193,7 +232,7 @@ $script:TxtRoot = New-ThemeTextBox $cardPath 108 36 420 (Get-DefaultInstallRoot)
 Enable-PathAutoComplete $script:TxtRoot
 [void](New-ThemeButton $cardPath 536 36 88 24 '浏览' 'ghost' { Browse-Into $script:TxtRoot })
 
-# 自动分类预览(只读):AstrBot / NapCat / 载荷各占一个子目录
+# 自动分类预览(只读):AstrBot / 机器人后端 / 载荷各占一个子目录
 $script:LblSub1 = New-ThemeLabel $cardPath 30 68 594 18 '' 8.5 -ColorName 'Cyan'
 $script:LblSub2 = New-ThemeLabel $cardPath 30 88 594 18 '' 8.5 -ColorName 'Cyan'
 $script:LblSub3 = New-ThemeLabel $cardPath 30 108 594 18 '' 8.5 -ColorName 'Cyan'
@@ -202,22 +241,28 @@ $script:LblFree = New-ThemeLabel $cardPath 14 138 610 20 '正在检测磁盘可�
 
 function Get-SubPaths {
     # 由安装根目录推导三个子目录;根目录规范化去掉尾部反斜杠。
+    # 机器人后端子目录随第 1 页的单选切换:<root>\NapCat 或 <root>\SnowLuma。
     param([string]$Root)
     $r = ([string]$Root).TrimEnd('\')
     $paths = @{}
     $paths['astr'] = $r + '\AstrBot'
-    $paths['nap'] = $r + '\NapCat'
+    if (Test-WizSnowluma) {
+        $paths['bot'] = $r + '\SnowLuma'
+    } else {
+        $paths['bot'] = $r + '\NapCat'
+    }
     $paths['payload'] = $r + '\payload'
     return $paths
 }
 
 function Update-Location {
     $root = $script:TxtRoot.Text.Trim()
+    $name = Get-WizBotName
     if (Test-AbsPath $root) {
         $p = Get-SubPaths $root
         $script:LblSub1.Text = 'AstrBot 程序与数据  ->  ' + $p['astr']
-        $script:LblSub2.Text = 'NapCat 配置与日志   ->  ' + $p['nap']
-        $script:LblSub3.Text = 'NapCat/QQ 程序载荷  ->  ' + $p['payload']
+        $script:LblSub2.Text = $name + ' 配置与日志   ->  ' + $p['bot']
+        $script:LblSub3.Text = $name + '/QQ 程序载荷  ->  ' + $p['payload']
     } else {
         $script:LblSub1.Text = '请填写一个绝对路径,例如 F:\nbot(建议放在空间大的盘)'
         $script:LblSub2.Text = ''
@@ -238,7 +283,9 @@ function Update-Location {
 
 $script:TxtRoot.add_TextChanged({ Update-Location })
 
-$cardNet = New-ThemeCard $script:Page1 20 202 640 224 '网络与端口'
+# --- 网络与端口 -----------------------------------------------------------------
+
+$cardNet = New-ThemeCard $script:Page1 20 272 640 232 '网络与端口'
 
 [void](New-ThemeLabel $cardNet 14 36 100 20 'GitHub 加速' 9 'TextDim')
 $script:CmbGh = New-ThemeCombo $cardNet 118 34 250 $script:GhItems 0
@@ -246,32 +293,122 @@ $script:CmbGh = New-ThemeCombo $cardNet 118 34 250 $script:GhItems 0
 [void](New-ThemeLabel $cardNet 388 36 80 20 'PyPI 镜像' 9 'TextDim')
 $script:CmbPip = New-ThemeCombo $cardNet 468 34 156 $script:PipItems 0
 
-# 加速说明:默认已选好国内推荐节点,新手直接下一步即可
-[void](New-ThemeLabel $cardNet 14 60 610 30 ('国内网络请保持上面两个加速（已默认选好）：直连 GitHub 常被重置、直连 PyPI 装依赖很慢。' +
+# 加速说明:默认已选好国内推荐节点,新手直接下一步即可。
+# 高度按实测给足:这段在 610px 宽下换成两行,Graphics.MeasureString 量出来
+# 需要 31-32px(随字体而异),原来只给 30px,末行被裁掉一线,看着像字被"卡住"。
+[void](New-ThemeLabel $cardNet 14 60 610 38 ('国内网络请保持上面两个加速（已默认选好）：直连 GitHub 常被重置、直连 PyPI 装依赖很慢。' +
     '若某个节点抽风,换一个再重试即可；有全局代理/在海外可都选“不使用/官方”。') 8.5 'Warn')
 
-[void](New-ThemeLabel $cardNet 14 100 110 20 'AstrBot WebUI' 9 'TextDim')
-$script:TxtPortWeb = New-ThemeTextBox $cardNet 128 98 70 (Get-Cfg 'ASTRBOT_PORT')
-[void](New-ThemeLabel $cardNet 218 100 90 20 'OneBot WS' 9 'TextDim')
-$script:TxtPortWs = New-ThemeTextBox $cardNet 312 98 70 (Get-Cfg 'ASTRBOT_WS_PORT')
+# 左列标签给足 124px:'SnowLuma WebUI' 9pt 实测要 113px,110px 的栏位会
+# 换行后被裁成虚点。输入框与第二列相应右移(142 / 232 / 326)。
+[void](New-ThemeLabel $cardNet 14 106 124 20 'AstrBot WebUI' 9 'TextDim')
+$script:TxtPortWeb = New-ThemeTextBox $cardNet 142 104 70 (Get-Cfg 'ASTRBOT_PORT')
+[void](New-ThemeLabel $cardNet 232 106 90 20 'OneBot WS' 9 'TextDim')
+$script:TxtPortWs = New-ThemeTextBox $cardNet 326 104 70 (Get-Cfg 'ASTRBOT_WS_PORT')
 
-[void](New-ThemeLabel $cardNet 14 130 110 20 'NapCat WebUI' 9 'TextDim')
-$script:TxtPortNap = New-ThemeTextBox $cardNet 128 128 70 (Get-Cfg 'NAPCAT_WEBUI_PORT')
-[void](New-ThemeLabel $cardNet 218 130 90 20 'OneBot HTTP' 9 'TextDim')
-$script:TxtPortHttp = New-ThemeTextBox $cardNet 312 128 70 (Get-Cfg 'ONEBOT_HTTP_PORT')
+# 第三个端口的标签与默认值随后端单选切换（NapCat WebUI/6099 ↔ SnowLuma WebUI/5099）
+$script:LblPortBot = New-ThemeLabel $cardNet 14 136 124 20 'NapCat WebUI' 9 'TextDim'
+$script:TxtPortBot = New-ThemeTextBox $cardNet 142 134 70 (Get-Cfg 'NAPCAT_WEBUI_PORT')
+[void](New-ThemeLabel $cardNet 232 136 90 20 'OneBot HTTP' 9 'TextDim')
+$script:TxtPortHttp = New-ThemeTextBox $cardNet 326 134 70 (Get-Cfg 'ONEBOT_HTTP_PORT')
 
-[void](New-ThemeLabel $cardNet 14 162 320 20 'QQ 安装目录（可选，留空自动探测）' 9 'TextDim')
-$script:TxtQQ = New-ThemeTextBox $cardNet 14 186 510 (Get-Cfg 'QQ_INSTALL_DIR')
+[void](New-ThemeLabel $cardNet 14 168 320 20 'QQ 安装目录（可选，留空自动探测）' 9 'TextDim')
+$script:TxtQQ = New-ThemeTextBox $cardNet 14 192 510 (Get-Cfg 'QQ_INSTALL_DIR')
 Enable-PathAutoComplete $script:TxtQQ
-[void](New-ThemeButton $cardNet 536 186 88 24 '浏览' 'ghost' { Browse-Into $script:TxtQQ })
+[void](New-ThemeButton $cardNet 536 192 88 24 '浏览' 'ghost' { Browse-Into $script:TxtQQ })
 
-[void](New-ThemeLabel $script:Page1 22 430 636 42 '提示：安装过程会自动下载托管 Python、AstrBot 源码、NapCat 与 QQ 安装包，请保持网络畅通；全程约 10 - 30 分钟。' 9 'TextDim')
+# --- 协议同意（仅 SnowLuma 后端显示）------------------------------------------
+
+# SnowLuma 首次打开 WebUI 会要求同意 EULA/隐私政策才能解锁面板；声明式同意
+# 靠 SNOWLUMA_ACCEPT_EULA / SNOWLUMA_ACCEPT_PRIVACY 两个配置键，安装器绝不
+# 能替用户默认勾上，所以这里默认不勾选，同意与否交给用户自己判断；选择
+# SnowLuma 后端时必须勾选才放行安装，选择 NapCat 时整张卡片隐藏。
+$script:CardConsent = New-ThemeCard $script:Page1 20 514 640 80 '协议同意'
+
+function Open-SnowlumaDoc {
+    # 装好之后包内自带 EULA.md / PRIVACY.md，优先直接打开本地文件；
+    # 安装前文件还不存在时，退回官方仓库页面。
+    param([string]$FileName, [string]$FallbackUrl)
+    $payload = Get-Cfg 'SL_PAYLOAD_ROOT'
+    $local = $null
+    if ($payload) { $local = Join-Path (Join-Path $payload 'current') $FileName }
+    try {
+        if ($local -and (Test-Path -LiteralPath $local)) {
+            Start-Process -FilePath 'notepad.exe' -ArgumentList ('"' + $local + '"')
+            return
+        }
+    } catch { }
+    try {
+        Start-Process -FilePath $FallbackUrl
+    } catch {
+        Show-Msg ('无法打开链接：' + $_.Exception.Message)
+    }
+}
+
+$script:ChkConsent = New-Object System.Windows.Forms.CheckBox
+$script:ChkConsent.SetBounds(14, 32, 612, 20)
+$script:ChkConsent.Text = '我已阅读并同意 SnowLuma 的 EULA 与隐私政策（选 SnowLuma 后端需勾选后才能开始安装）'
+$script:ChkConsent.Checked = $false
+$script:ChkConsent.BackColor = Get-ThemeColor 'Card'
+$script:ChkConsent.ForeColor = Get-ThemeColor 'Text'
+$script:ChkConsent.Font = (New-ThemeFont 8.7)
+$script:CardConsent.Controls.Add($script:ChkConsent)
+
+$linkEula = New-Object System.Windows.Forms.LinkLabel
+$linkEula.SetBounds(34, 56, 90, 16)
+$linkEula.Text = 'EULA 全文'
+$linkEula.Font = (New-ThemeFont 8.5)
+$linkEula.LinkColor = Get-ThemeColor 'Cyan'
+$linkEula.ActiveLinkColor = Get-ThemeColor 'Pink'
+$linkEula.BackColor = [System.Drawing.Color]::Transparent
+$linkEula.add_LinkClicked({ Open-SnowlumaDoc 'EULA.md' 'https://github.com/SnowLuma/SnowLuma' })
+$script:CardConsent.Controls.Add($linkEula)
+
+$linkPrivacy = New-Object System.Windows.Forms.LinkLabel
+$linkPrivacy.SetBounds(130, 56, 110, 16)
+$linkPrivacy.Text = '隐私政策全文'
+$linkPrivacy.Font = (New-ThemeFont 8.5)
+$linkPrivacy.LinkColor = Get-ThemeColor 'Cyan'
+$linkPrivacy.ActiveLinkColor = Get-ThemeColor 'Pink'
+$linkPrivacy.BackColor = [System.Drawing.Color]::Transparent
+$linkPrivacy.add_LinkClicked({ Open-SnowlumaDoc 'PRIVACY.md' 'https://github.com/SnowLuma/SnowLuma' })
+$script:CardConsent.Controls.Add($linkPrivacy)
+
+$script:LblDlTip = New-ThemeLabel $script:Page1 22 602 636 42 '' 9 'TextDim'
+
+# --- 后端切换联动 --------------------------------------------------------------
+
+function Update-BackendUi {
+    # 后端单选切换时联动:协议卡片可见性、端口第三项标签/默认值、目录预览、
+    # 下载提示文案。端口默认值直接回填对应后端的配置值(改过就是改过的值)。
+    $snow = Test-WizSnowluma
+    $name = Get-WizBotName
+    $script:CardConsent.Visible = $snow
+    $script:LblPortBot.Text = $name + ' WebUI'
+    if ($snow) {
+        $port = Get-Cfg 'SNOWLUMA_WEBUI_PORT'
+        if (-not $port) { $port = '5099' }
+    } else {
+        $port = Get-Cfg 'NAPCAT_WEBUI_PORT'
+        if (-not $port) { $port = '6099' }
+    }
+    $script:TxtPortBot.Text = $port
+    $script:LblDlTip.Text = '提示：安装过程会自动下载托管 Python、AstrBot 源码、' + $name +
+        ' 与 QQ 安装包，请保持网络畅通；全程约 10 - 30 分钟。'
+    Update-Location
+}
+
+$script:RadNap.add_CheckedChanged({ Update-BackendUi })
+$script:RadSnow.add_CheckedChanged({ Update-BackendUi })
 
 # -----------------------------------------------------------------------------
 # 校验与开始安装
 # -----------------------------------------------------------------------------
 
 function Invoke-BeginInstall {
+    $snow = Test-WizSnowluma
+    $botName = Get-WizBotName
+
     $root = $script:TxtRoot.Text.Trim()
     if (-not $root) {
         Show-Msg '安装根目录不能为空。'
@@ -285,9 +422,9 @@ function Invoke-BeginInstall {
         Show-Msg '请不要直接选盘符根目录（如 F:\），填一个子文件夹（如 F:\nbot），程序会分类放进去。'
         return
     }
+    $rootTrim = $root.TrimEnd('\')
     $sub = Get-SubPaths $root
     $astrRoot = $sub['astr']
-    $napRoot = $sub['nap']
     $payloadRoot = $sub['payload']
 
     $qqDir = $script:TxtQQ.Text.Trim()
@@ -296,10 +433,16 @@ function Invoke-BeginInstall {
         return
     }
 
+    # SnowLuma 后端必须先同意协议:安装器不能替用户默认同意,不勾不放行。
+    if ($snow -and -not $script:ChkConsent.Checked) {
+        Show-Msg '选择 SnowLuma 后端需要先阅读并勾选同意其 EULA 与隐私政策，才能开始安装。'
+        return
+    }
+
     $portChecks = @(
         @('AstrBot WebUI 端口', $script:TxtPortWeb),
         @('OneBot WS 端口', $script:TxtPortWs),
-        @('NapCat WebUI 端口', $script:TxtPortNap),
+        @(($botName + ' WebUI 端口'), $script:TxtPortBot),
         @('OneBot HTTP 端口', $script:TxtPortHttp))
     $ports = @()
     foreach ($item in $portChecks) {
@@ -319,17 +462,33 @@ function Invoke-BeginInstall {
         }
     }
 
+    $backend = 'napcat'
+    if ($snow) { $backend = 'snowluma' }
+    Set-Cfg 'BOT_BACKEND' $backend
     Set-Cfg 'ASTRBOT_ROOT' $astrRoot
-    Set-Cfg 'NAPCAT_ROOT' $napRoot
+    # 两套 ROOT/PAYLOAD 键都按所选安装根写好:未选后端的键也一并写,
+    # 以后切换后端时不用重新选目录。
+    Set-Cfg 'NAPCAT_ROOT' ($rootTrim + '\NapCat')
     Set-Cfg 'NAPCAT_PAYLOAD_ROOT' $payloadRoot
+    Set-Cfg 'SL_ROOT' ($rootTrim + '\SnowLuma')
+    Set-Cfg 'SL_PAYLOAD_ROOT' $payloadRoot
     Set-Cfg 'ASTRBOT_PORT' ([string]$ports[0])
     Set-Cfg 'ASTRBOT_WS_PORT' ([string]$ports[1])
-    Set-Cfg 'NAPCAT_WEBUI_PORT' ([string]$ports[2])
+    if ($snow) {
+        Set-Cfg 'SNOWLUMA_WEBUI_PORT' ([string]$ports[2])
+    } else {
+        Set-Cfg 'NAPCAT_WEBUI_PORT' ([string]$ports[2])
+    }
     Set-Cfg 'ONEBOT_HTTP_PORT' ([string]$ports[3])
     Set-Cfg 'GITHUB_ACCESS' 'auto'
     Set-Cfg 'GITHUB_MIRROR' $script:GhValues[$script:CmbGh.SelectedIndex]
     Set-Cfg 'PIP_INDEX_URL' $script:PipValues[$script:CmbPip.SelectedIndex]
     Set-Cfg 'QQ_INSTALL_DIR' $qqDir
+    if ($snow) {
+        # 走到这里必然已勾选(上面拦截过),声明式同意写 1。
+        Set-Cfg 'SNOWLUMA_ACCEPT_EULA' '1'
+        Set-Cfg 'SNOWLUMA_ACCEPT_PRIVACY' '1'
+    }
     try {
         Write-Config
     } catch {
@@ -341,8 +500,8 @@ function Invoke-BeginInstall {
     Start-InstallProcess
 }
 
-[void](New-ThemeButton $script:Page1 496 482 164 42 '开始安装' 'primary' { Invoke-BeginInstall })
-[void](New-ThemeButton $script:Page1 380 482 104 42 '取消' 'ghost' { $script:Form.Close() })
+[void](New-ThemeButton $script:Page1 496 652 164 42 '开始安装' 'primary' { Invoke-BeginInstall })
+[void](New-ThemeButton $script:Page1 380 652 104 42 '取消' 'ghost' { $script:Form.Close() })
 
 # =============================================================================
 # 第 2 页：安装
@@ -366,10 +525,11 @@ $script:LogBox = New-ThemeLogBox $cardRun 14 92 610 380
 
 function Get-StageText {
     param([string]$Text)
+    $botName = Get-WizBotName
     if (-not $Text) { return '正在准备安装环境...' }
     if ($Text -match '已启动') { return '即将完成...' }
     if ($Text -match '计划任务') { return '正在注册自启与守护任务...' }
-    if ($Text -match '下载 NapCat' -or $Text -match 'NapCat') { return '正在安装 NapCat 与 QQ...' }
+    if ($Text -match 'NapCat' -or $Text -match 'SnowLuma') { return ('正在安装 ' + $botName + ' 与 QQ...') }
     if ($Text -match '安装 AstrBot') { return '正在安装 AstrBot（下载源码、创建 venv、装依赖，较慢）...' }
     return '正在准备安装环境...'
 }
@@ -493,34 +653,59 @@ function Complete-Install {
     param([int]$Code)
     $script:ExitCode = $Code
     $script:Installing = $false
+    $snow = Test-WizSnowluma
     $astrPort = Get-Cfg 'ASTRBOT_PORT'
     if (-not $astrPort) { $astrPort = '6185' }
-    $napPort = Get-Cfg 'NAPCAT_WEBUI_PORT'
-    if (-not $napPort) { $napPort = '6099' }
+    if ($snow) {
+        $napPort = Get-Cfg 'SNOWLUMA_WEBUI_PORT'
+        if (-not $napPort) { $napPort = '5099' }
+    } else {
+        $napPort = Get-Cfg 'NAPCAT_WEBUI_PORT'
+        if (-not $napPort) { $napPort = '6099' }
+    }
 
     if ($Code -eq 0) {
         $script:Lbl3Title.Text = '安装完成！'
         $script:Lbl3Title.ForeColor = Get-ThemeColor 'Pink'
-        # 抓取两个 WebUI 的登录凭据(AstrBot 初始账号密码 / NapCat token)
+        # 抓取两个 WebUI 的登录凭据:AstrBot 初始账号密码 +（按后端）
+        # NapCat token / SnowLuma 用户名+初始密码。
         $cred = Get-AstrbotCred
-        $napToken = Get-NapcatToken
         $astrPassLine = 'AstrBot 登录：账号 ' + $cred['user'] + '  密码 '
         if ($cred['found']) { $astrPassLine = $astrPassLine + $cred['pass'] + '(初始密码,登录后请改)' }
         else { $astrPassLine = $astrPassLine + '见 AstrBot 日志(可能已改过)' }
-        $napTokenLine = 'NapCat 登录：WebUI Token '
-        if ($napToken) { $napTokenLine = $napTokenLine + $napToken } else { $napTokenLine = $napTokenLine + '见 NapCat\config\webui.json' }
+        if ($snow) {
+            # SnowLuma 用用户名+密码登录(scrypt 哈希，磁盘上没有明文 token 可读)；
+            # 密码没改过时每次重启都会重新生成，所以要提示尽快改密。
+            $snowCred = Get-SnowlumaCred
+            $napTokenLine = 'SnowLuma 登录：用户名 ' + $snowCred['user'] + '  密码 '
+            if ($snowCred['found']) {
+                $napTokenLine = $napTokenLine + $snowCred['pass'] + '(初始密码,登录后请立即改；未改密时每次重启都会重新生成)'
+            } else {
+                $napTokenLine = $napTokenLine + '见 SnowLuma\logs\snowluma.log 或控制面板「登录信息」(可能已改过)'
+            }
+            $botUrlLine = 'SnowLuma 管理页：http://127.0.0.1:' + $napPort + '/'
+            $nextLine1 = '下一步：OneBot 对接不需要等 QQ 号，现在就能在控制面板点「配置 OneBot'
+            $nextLine2 = '对接」完成；点「扫码登录 QQ」用手机 QQ 扫码登录后即可直接使用。'
+        } else {
+            $napToken = Get-NapcatToken
+            $napTokenLine = 'NapCat 登录：WebUI Token '
+            if ($napToken) { $napTokenLine = $napTokenLine + $napToken } else { $napTokenLine = $napTokenLine + '见 NapCat\config\webui.json' }
+            $botUrlLine = 'NapCat 管理页：http://127.0.0.1:' + $napPort + '/webui'
+            $nextLine1 = '下一步：点「扫码登录 QQ」用手机 QQ 扫码；登录完成后在控制面板点'
+            $nextLine2 = '「配置 OneBot 对接」填入机器人 QQ 号，即可完成最后一步对接。'
+        }
         # 每个元素都要用括号包住：逗号的优先级高于加号，不包括号会被拼成一整串。
         $lines = @(
             ('AstrBot 管理页：http://127.0.0.1:' + $astrPort + '/'),
             $astrPassLine,
-            ('NapCat 管理页：http://127.0.0.1:' + $napPort + '/webui'),
+            $botUrlLine,
             $napTokenLine,
             ('配置文件：' + (Get-ConfigPath) + '   数据目录：' + (Get-Cfg 'ASTRBOT_ROOT')),
             '',
             '登录信息也能随时在控制面板点「登录信息」查看/复制。',
             '',
-            '下一步：点「扫码登录 QQ」用手机 QQ 扫码；登录完成后在控制面板点',
-            '「配置 OneBot 对接」填入机器人 QQ 号，即可完成最后一步对接。')
+            $nextLine1,
+            $nextLine2)
         Set-BodyLines $lines
         $script:Btn3Panel.Show()
         $script:Btn3QQ.Show()
@@ -592,7 +777,7 @@ $script:Form.add_FormClosing({
     $script:Timer.Stop()
 })
 
-Update-Location
+Update-BackendUi
 Show-Page 1
 
 if ($env:NBOT_GUI_RENDERTEST -eq '1') {
@@ -608,6 +793,15 @@ if ($env:NBOT_GUI_RENDERTEST -eq '1') {
             [System.Windows.Forms.Application]::DoEvents()
             Start-Sleep -Milliseconds 100
         }
+    }
+    # 第 1 页有随后端切换的分支形态(协议卡片/端口标签),把另一种后端的
+    # 形态也切出来绘制一遍,两条分支的渲染都测到。
+    if ($script:RadSnow.Checked) { $script:RadNap.Checked = $true } else { $script:RadSnow.Checked = $true }
+    Show-Page 1
+    for ($i = 0; $i -lt 3; $i++) {
+        $script:Form.Refresh()
+        [System.Windows.Forms.Application]::DoEvents()
+        Start-Sleep -Milliseconds 100
     }
     $paintErrors = Get-ThemePaintErrors
     Write-Host ('PAINT ERRORS: ' + $paintErrors.Count)

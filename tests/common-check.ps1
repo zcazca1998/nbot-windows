@@ -1,5 +1,6 @@
 ﻿# common-check.ps1
-# Functional checks for lib\common.ps1 (run on the dev machine, PS 5.1+).
+# Functional checks for lib\common.ps1 and the SnowLuma OneBot template in
+# modules\onebot.ps1 (run on the dev machine, PS 5.1+).
 # Uses a throwaway config file via $env:NBOT_CONFIG so the real
 # %ProgramData% config is never touched.
 #
@@ -197,15 +198,133 @@ if (Test-HasFn @('Expand-Zip')) {
 }
 
 # ---------------------------------------------------------------------------
-# Case 6: cleanup temp files
+# Case 6: the SnowLuma OneBot template in modules\onebot.ps1 generates a
+# config with SnowLuma's field names, an explicit host on every listening
+# adapter, and none of NapCat's field names. SnowLuma rejects unknown keys
+# (rejectUnknownKeys), so a NapCat field name sneaking into the template
+# would make SnowLuma refuse the whole file at runtime.
+#
+# Driven from the source text on purpose: Configure-OneBot itself restarts
+# scheduled tasks and touches the AstrBot install, which a test must not do.
+# The template here-string is extracted from the SnowLuma branch, expanded
+# with placeholder values (exactly what the code does at run time), and the
+# resulting JSON is validated.
+# ---------------------------------------------------------------------------
+$case6 = 'case 6: SnowLuma onebot.json template (fields, explicit host, no NapCat keys)'
+try {
+    $onebotPath = Join-Path $root 'modules\onebot.ps1'
+    if (-not (Test-Path -LiteralPath $onebotPath -PathType Leaf)) {
+        throw "modules\onebot.ps1 not found: $onebotPath"
+    }
+    $obText = [System.IO.File]::ReadAllText($onebotPath)
+
+    # Narrow to the SnowLuma template function when one exists (a `function`
+    # line naming SnowLuma whose body carries the "networks" key); otherwise
+    # scan the whole file for the template here-string. Braces in the JSON
+    # are balanced, so depth counting finds the end of the function.
+    $scope = $null
+    foreach ($m in [regex]::Matches($obText, '(?im)^[ \t]*function\s+[A-Za-z0-9_-]*snowluma[A-Za-z0-9_-]*')) {
+        $open = $obText.IndexOf('{', $m.Index)
+        if ($open -lt 0) { continue }
+        $depth = 0
+        $close = -1
+        for ($i = $open; $i -lt $obText.Length; $i++) {
+            $ch = $obText[$i]
+            if ($ch -eq '{') { $depth++ }
+            elseif ($ch -eq '}') {
+                $depth--
+                if ($depth -eq 0) { $close = $i; break }
+            }
+        }
+        if ($close -lt 0) { continue }
+        $body = $obText.Substring($m.Index, $close - $m.Index + 1)
+        if ($body -cmatch '"networks"') { $scope = $body; break }
+    }
+    if ($null -eq $scope) { $scope = $obText }
+
+    # Pull out the expandable here-string that carries the SnowLuma template.
+    $template = $null
+    foreach ($hs in [regex]::Matches($scope, '@"[ \t]*\r?\n(.*?)\r?\n"@', [System.Text.RegularExpressions.RegexOptions]::Singleline)) {
+        if ($hs.Groups[1].Value -cmatch '"networks"') { $template = $hs.Groups[1].Value; break }
+    }
+    if ($null -eq $template) {
+        throw 'no here-string containing "networks" found in modules\onebot.ps1 (SnowLuma template missing?)'
+    }
+
+    # Expand it the same way the here-string expands at run time: give every
+    # referenced variable a placeholder (numeric for *port* variables so the
+    # JSON stays well-formed, a token string for everything else).
+    $tokenValue = 'TESTTOKEN0123456789abcdef'
+    $varNames = @{}
+    foreach ($vm in [regex]::Matches($template, '\$([A-Za-z_][A-Za-z0-9_]*)')) {
+        $varNames[$vm.Groups[1].Value] = $true
+    }
+    foreach ($vn in $varNames.Keys) {
+        if ($vn -match '(?i)port') {
+            Set-Variable -Name $vn -Value 3199 -Scope Local
+        } else {
+            Set-Variable -Name $vn -Value $tokenValue -Scope Local
+        }
+    }
+    $json = $ExecutionContext.InvokeCommand.ExpandString($template)
+
+    $problems = @()
+
+    # The expanded template must be well-formed JSON at all.
+    try {
+        [void]($json | ConvertFrom-Json)
+    } catch {
+        $problems += ('not valid JSON: ' + $_.Exception.Message)
+    }
+
+    # SnowLuma field names that must be present (case-sensitive).
+    foreach ($needle in @('"networks"', '"wsClients"', '"accessToken"', '"enabled"', '"messageFormat"', '"reconnectIntervalMs"', '"enableWebSocket"')) {
+        if (-not ($json.Contains($needle))) {
+            $problems += ("missing SnowLuma field {0}" -f $needle)
+        }
+    }
+
+    # NapCat field names that must be absent (case-sensitive: enableWebsocket
+    # with a lowercase s is NapCat's; SnowLuma's enableWebSocket must not
+    # trip it).
+    foreach ($bad in @('"network"\s*:', 'websocketClients', 'messagePostFormat', 'enableWebsocket')) {
+        if ($json -cmatch $bad) {
+            $problems += ("NapCat field name present: {0}" -f $bad)
+        }
+    }
+
+    # Every non-empty listening adapter (httpServers / wsServers) must pin an
+    # explicit host; SnowLuma defaults a missing host to 0.0.0.0.
+    foreach ($blk in [regex]::Matches($json, '"(httpServers|wsServers)"\s*:\s*\[(.*?)\]', 'Singleline')) {
+        $kind = $blk.Groups[1].Value
+        $body = $blk.Groups[2].Value
+        if ($body.Trim() -eq '') { continue }
+        foreach ($entry in [regex]::Matches($body, '\{(.*?)\}', 'Singleline')) {
+            if ($entry.Groups[1].Value -notmatch '"host"\s*:') {
+                $problems += ("a {0} entry has no explicit host" -f $kind)
+            }
+        }
+    }
+
+    if ($problems.Count -eq 0) {
+        Pass $case6
+    } else {
+        Fail $case6 ($problems -join '; ')
+    }
+} catch {
+    Fail $case6 $_.Exception.Message
+}
+
+# ---------------------------------------------------------------------------
+# Case 7: cleanup temp files
 # ---------------------------------------------------------------------------
 try {
     if (Test-Path -LiteralPath $tmpConfig) { Remove-Item -LiteralPath $tmpConfig -Force }
     if (Test-Path -LiteralPath $tmpWork) { Remove-Item -LiteralPath $tmpWork -Recurse -Force }
     Remove-Item Env:\NBOT_CONFIG -ErrorAction SilentlyContinue
-    Pass 'case 6: cleanup temp files'
+    Pass 'case 7: cleanup temp files'
 } catch {
-    Fail 'case 6: cleanup temp files' $_.Exception.Message
+    Fail 'case 7: cleanup temp files' $_.Exception.Message
 }
 
 # ---------------------------------------------------------------------------

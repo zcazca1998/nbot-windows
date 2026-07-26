@@ -32,16 +32,18 @@ $include = @(
     'setup.bat', 'setup.vbs', 'wizard.ps1', 'VERSION',
     'README.md', 'PITFALLS.md',
     'lib\common.ps1', 'lib\theme.ps1',
-    'modules\astrbot.ps1', 'modules\napcat.ps1', 'modules\onebot.ps1', 'modules\tasks.ps1',
-    'assets\bin\astrbot-launch.bat', 'assets\bin\napcat-launch.bat',
-    'assets\bin\astrbot-prepare.py', 'assets\bin\watchdog.ps1', 'assets\bin\run-hidden.vbs',
+    'modules\astrbot.ps1', 'modules\qq.ps1', 'modules\napcat.ps1', 'modules\snowluma.ps1',
+    'modules\onebot.ps1', 'modules\tasks.ps1',
+    'assets\bin\astrbot-launch.bat', 'assets\bin\napcat-launch.bat', 'assets\bin\snowluma-launch.bat',
+    'assets\bin\astrbot-prepare.py', 'assets\bin\astrbot-setpass.py', 'assets\bin\astrbot-setplatform.py',
+    'assets\bin\watchdog.ps1', 'assets\bin\run-hidden.vbs',
     'assets\bin\tray-autostart.vbs', 'assets\bin\nbot.ico',
     'assets\bin\nbot.cmd', 'assets\bin\astrbotctl.cmd', 'assets\bin\napcatctl.cmd',
-    'assets\bin\qqlogin.cmd',
+    'assets\bin\snowlumactl.cmd', 'assets\bin\qqlogin.cmd',
     'tests\static-check.ps1', 'tests\common-check.ps1'
 )
 if ($IncludeOffline) {
-    foreach ($f in @('python-setup.exe', 'qq-setup.exe', 'napcat-shell.zip', 'astrbot-src.zip')) {
+    foreach ($f in @('python-setup.exe', 'qq-setup.exe', 'napcat-shell.zip', 'snowluma-win.zip', 'astrbot-src.zip')) {
         $p = Join-Path $root ('offline\' + $f)
         if (Test-Path -LiteralPath $p) { $include += ('offline\' + $f) }
     }

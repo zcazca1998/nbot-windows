@@ -122,27 +122,49 @@ function Get-ConfigPath {
 
 function Load-Config {
     # 默认键顺序（写配置文件时按此顺序全部写出）
+    # 键分三类：
+    #   NAPCAT_* / SL_*  安装器自己的配置，只有本项目读。
+    #   SNOWLUMA_*  与 SnowLuma 自己的环境变量同名，由 snowluma-launch.bat
+    #               原样 export，SnowLuma 启动时直接采纳（它的 env 优先级高于
+    #               config\runtime.json，且不会被写回该文件），所以配置真源
+    #               始终是 nbot.conf。新增此类键前请先确认 SnowLuma 确实
+    #               支持同名环境变量。
     $script:CfgKeys = @(
-        'ASTRBOT_ROOT', 'NAPCAT_ROOT', 'NAPCAT_PAYLOAD_ROOT',
-        'ASTRBOT_PORT', 'ASTRBOT_WS_PORT', 'NAPCAT_WEBUI_PORT', 'ONEBOT_HTTP_PORT',
+        'BOT_BACKEND',
+        'ASTRBOT_ROOT', 'NAPCAT_ROOT', 'NAPCAT_PAYLOAD_ROOT', 'SL_ROOT', 'SL_PAYLOAD_ROOT',
+        'ASTRBOT_PORT', 'ASTRBOT_WS_PORT', 'NAPCAT_WEBUI_PORT', 'SNOWLUMA_WEBUI_PORT', 'ONEBOT_HTTP_PORT',
         'GITHUB_ACCESS', 'GITHUB_PROXY', 'GITHUB_MIRROR', 'PIP_INDEX_URL',
         'PYTHON_VERSION', 'PYTHON_URL', 'PYTHON_WIN7_URL', 'PYTHON_FORCE_MANAGED',
         'ASTRBOT_REPO', 'ASTRBOT_TAG',
         'NAPCAT_REPO', 'NAPCAT_ASSET', 'NAPCAT_LAUNCH',
-        'QQ_WIN_URL', 'QQ_WIN_URL_LEGACY', 'QQ_INSTALL_DIR', 'QQ_UIN'
+        'SL_REPO', 'SL_ASSET', 'SL_LAUNCH', 'SL_NODE',
+        'SNOWLUMA_HOOK_AUTOLOAD', 'SNOWLUMA_ACCEPT_EULA', 'SNOWLUMA_ACCEPT_PRIVACY',
+        'QQ_WIN_URL', 'QQ_WIN_URL_LEGACY', 'QQ_INSTALL_DIR', 'QQ_EXE', 'QQ_UIN'
     )
 
     $script:Cfg = @{}
+    # 机器人后端：napcat(默认)| snowluma。解析统一走 Get-Backend。
+    $script:Cfg['BOT_BACKEND'] = 'napcat'
     $script:Cfg['ASTRBOT_ROOT'] = 'C:\AstrBot'
     $script:Cfg['NAPCAT_ROOT'] = 'C:\NapCat'
     $script:Cfg['NAPCAT_PAYLOAD_ROOT'] = 'C:\AstrBot\.nbot\napcat'
+    $script:Cfg['SL_ROOT'] = 'C:\SnowLuma'
+    $script:Cfg['SL_PAYLOAD_ROOT'] = 'C:\AstrBot\.nbot\snowluma'
     $script:Cfg['ASTRBOT_PORT'] = '6185'
     $script:Cfg['ASTRBOT_WS_PORT'] = '6199'
     $script:Cfg['NAPCAT_WEBUI_PORT'] = '6099'
+    # SnowLuma 自己的默认 WebUI 端口就是 5099
+    $script:Cfg['SNOWLUMA_WEBUI_PORT'] = '5099'
     $script:Cfg['ONEBOT_HTTP_PORT'] = '3005'
     $script:Cfg['GITHUB_ACCESS'] = 'auto'
     $script:Cfg['GITHUB_PROXY'] = ''
-    $script:Cfg['GITHUB_MIRROR'] = ''
+    # 默认就带一个 ghproxy 风格的加速前缀:国内直连 GitHub Release 经常掉到
+    # 几十 KB/s(实测下 38MB 的包要 20 分钟),让每个用户自己踩一遍再去翻
+    # 文档配置是没道理的。auto 模式下镜像失败会自动回退直连,所以默认配上
+    # 只有好处;不想用就在向导里选「不使用加速」,或设 GITHUB_ACCESS=direct。
+    # 取值与 wizard.ps1 的 $GhValues 首项保持一致,否则命令行安装和图形向导
+    # 安装会拿到不同的默认镜像。
+    $script:Cfg['GITHUB_MIRROR'] = 'https://ghfast.top'
     $script:Cfg['PIP_INDEX_URL'] = ''
     $script:Cfg['PYTHON_VERSION'] = '3.13.5'
     $script:Cfg['PYTHON_URL'] = ''
@@ -154,9 +176,23 @@ function Load-Config {
     $script:Cfg['NAPCAT_ASSET'] = ''
     # launcher-win10.bat 与 launcher.bat 内容一致，仅提权回退不依赖 wt.exe
     $script:Cfg['NAPCAT_LAUNCH'] = 'launcher-win10.bat'
+    $script:Cfg['SL_REPO'] = 'SnowLuma/SnowLuma'
+    $script:Cfg['SL_ASSET'] = ''
+    $script:Cfg['SL_LAUNCH'] = 'launcher.bat'
+    # 载荷内自带的 Node（完整版 zip 带 node.exe）。留空则用 PATH 上的 node。
+    $script:Cfg['SL_NODE'] = 'node.exe'
+    # SnowLuma 发现 QQ.exe 后自动注入 hook —— 无人值守必需
+    $script:Cfg['SNOWLUMA_HOOK_AUTOLOAD'] = '1'
+    # 协议同意：留空表示未同意，首次打开 WebUI 时由用户本人在页面上确认。
+    # 只有用户在向导里勾选后才写 1（详见 README「协议同意」一节）。
+    $script:Cfg['SNOWLUMA_ACCEPT_EULA'] = ''
+    $script:Cfg['SNOWLUMA_ACCEPT_PRIVACY'] = ''
     $script:Cfg['QQ_WIN_URL'] = ''
     $script:Cfg['QQ_WIN_URL_LEGACY'] = ''
     $script:Cfg['QQ_INSTALL_DIR'] = ''
+    # QQ.exe 的完整路径。SnowLuma 自己不启动 QQ,由 snowluma-launch.bat 拉起,
+    # 所以这个路径必须落到配置里(安装/修复时自动探测填入)。NapCat 后端不用它。
+    $script:Cfg['QQ_EXE'] = ''
     $script:Cfg['QQ_UIN'] = ''
 
     $file = Get-ConfigPath
@@ -212,6 +248,90 @@ function Write-Config {
     $temp = $file + '.tmp'
     Write-TextFile $temp $sb.ToString()
     Move-Item -Path $temp -Destination $file -Force
+}
+
+# -----------------------------------------------------------------------------
+# 后端选择(napcat / snowluma)
+# 这里是 BOT_BACKEND 的唯一解析点:其他文件一律调下面这些函数,禁止自己
+# if BOT_BACKEND 分支,避免各处解析口径不一致。
+# -----------------------------------------------------------------------------
+
+function Get-Backend {
+    # 读配置键 BOT_BACKEND;空/非法一律回落 napcat。
+    $backend = Get-Cfg 'BOT_BACKEND'
+    if ($backend) { $backend = ([string]$backend).Trim().ToLower() }
+    if ($backend -eq 'snowluma') { return 'snowluma' }
+    return 'napcat'
+}
+
+function Test-SnowLuma {
+    return ((Get-Backend) -eq 'snowluma')
+}
+
+function Get-BotName {
+    # 显示名,同时也是计划任务叶名(\NBot\<名>)。
+    if (Test-SnowLuma) { return 'SnowLuma' }
+    return 'NapCat'
+}
+
+function Get-BotTaskPath {
+    return ('\NBot\' + (Get-BotName))
+}
+
+function Get-BotRoot {
+    if (Test-SnowLuma) {
+        $root = Get-Cfg 'SL_ROOT'
+        if (-not $root) { $root = 'C:\SnowLuma' }
+        return $root
+    }
+    $root = Get-Cfg 'NAPCAT_ROOT'
+    if (-not $root) { $root = 'C:\NapCat' }
+    return $root
+}
+
+function Get-BotPayloadRoot {
+    if (Test-SnowLuma) {
+        $payload = Get-Cfg 'SL_PAYLOAD_ROOT'
+        if (-not $payload) { $payload = 'C:\AstrBot\.nbot\snowluma' }
+        return $payload
+    }
+    $payload = Get-Cfg 'NAPCAT_PAYLOAD_ROOT'
+    if (-not $payload) { $payload = 'C:\AstrBot\.nbot\napcat' }
+    return $payload
+}
+
+function Get-BotWebuiPort {
+    if (Test-SnowLuma) {
+        $port = Get-Cfg 'SNOWLUMA_WEBUI_PORT'
+        if (-not $port) { $port = '5099' }
+        return $port
+    }
+    $port = Get-Cfg 'NAPCAT_WEBUI_PORT'
+    if (-not $port) { $port = '6099' }
+    return $port
+}
+
+function Get-BotWebuiUrl {
+    $port = Get-BotWebuiPort
+    if (Test-SnowLuma) {
+        return ('http://127.0.0.1:' + $port + '/')
+    }
+    return ('http://127.0.0.1:' + $port + '/webui')
+}
+
+function Get-BotLaunchScript {
+    if (Test-SnowLuma) { return 'snowluma-launch.bat' }
+    return 'napcat-launch.bat'
+}
+
+function Get-BotMarker {
+    # 状态标记文件(state\<marker>.enabled)与 giveup 键的前缀。
+    if (Test-SnowLuma) { return 'snowluma' }
+    return 'napcat'
+}
+
+function Get-BotLogFile {
+    return (Join-Path (Get-BotRoot) ('logs\' + (Get-BotMarker) + '.log'))
 }
 
 # -----------------------------------------------------------------------------
@@ -699,7 +819,7 @@ function Wait-Tcp {
 }
 
 # -----------------------------------------------------------------------------
-# 登录凭据读取(AstrBot 初始账号密码 / NapCat WebUI token)
+# 登录凭据读取(AstrBot 初始账号密码 / NapCat WebUI token / SnowLuma WebUI 凭据)
 # -----------------------------------------------------------------------------
 
 function Get-AstrbotCred {
@@ -761,6 +881,93 @@ function Get-NapcatToken {
     $m = [regex]::Match($text, '"token"\s*:\s*"([^"]*)"')
     if ($m.Success) { return $m.Groups[1].Value }
     return $null
+}
+
+function Get-SnowlumaCred {
+    # SnowLuma 的 WebUI 用「用户名 + 密码」登录，不是 NapCat 那种明文 token：
+    # 密码以 scrypt 哈希存在 config\webui.json，磁盘上无法还原成明文，
+    # 初始密码只在启动日志里出现一次（[WebUI] initial credentials: ...）。
+    # 因此这里从日志取初始密码，再用 webui.json 的 mustChangePassword 判断
+    # 它是否还有效（用户改过密码后该字段为 false，旧的初始密码不该再展示）。
+    # 返回 hashtable: user / pass / found / mustChange。
+    #
+    # $SinceOffset：可选，只在日志这个字节偏移之后的新增内容里找密码行；
+    # 重置密码时旧实例可能还没退干净，日志里会留着上一轮的初始密码，不传
+    # 偏移量就可能把那一条当成新密码报出去。默认 -1 表示读整份日志，与
+    # 这个参数加入之前完全一致——gui.ps1 / wizard.ps1 / modules\snowluma.ps1
+    # 都是无参调用，不能改它们，所以默认值必须保证旧行为不变。
+    param([long]$SinceOffset = -1)
+    $r = @{}
+    $r['user'] = 'admin'
+    $r['pass'] = $null
+    $r['found'] = $false
+    $r['mustChange'] = $true
+    $root = Get-Cfg 'SL_ROOT'
+    if (-not $root) { return $r }
+
+    # SnowLuma 进程的工作目录是载荷 current 目录，它实际读写的 webui.json
+    # 在那里，不在 SL_ROOT\config；主副本只在下次启动 harvest 时才会追上。
+    # 所以载荷副本优先，SL_ROOT 主副本只作兜底（全新安装、主副本还没生成时）。
+    $payload = Get-Cfg 'SL_PAYLOAD_ROOT'
+    $wj = $null
+    if ($payload) {
+        $candidate = Join-Path $payload 'current\config\webui.json'
+        if (Test-Path -LiteralPath $candidate) { $wj = $candidate }
+    }
+    if (-not $wj) {
+        $candidate = Join-Path $root 'config\webui.json'
+        if (Test-Path -LiteralPath $candidate) { $wj = $candidate }
+    }
+    if ($wj) {
+        try {
+            $text = [IO.File]::ReadAllText($wj, (New-Object System.Text.UTF8Encoding($false)))
+            $m = [regex]::Match($text, '"mustChangePassword"\s*:\s*(true|false)')
+            if ($m.Success -and $m.Groups[1].Value -eq 'false') { $r['mustChange'] = $false }
+        } catch { }
+    }
+    # 已经改过密码：初始密码作废，不再从日志里翻出来显示。
+    if (-not $r['mustChange']) { return $r }
+
+    $log = Join-Path $root 'logs\snowluma.log'
+    $text = $null
+    if ($SinceOffset -ge 0) {
+        # 只读偏移量之后新增的字节，旧内容(包括上一轮的初始密码行)一律
+        # 看不见——见上面参数说明。
+        if (Test-Path -LiteralPath $log) {
+            $stream = $null
+            try {
+                $stream = New-Object System.IO.FileStream(
+                    $log, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read,
+                    [System.IO.FileShare]::ReadWrite)
+                $offset = $SinceOffset
+                if ($stream.Length -lt $offset) { $offset = 0 }   # 日志被轮转/清空,从头读
+                if ($stream.Length -gt $offset) {
+                    [void]$stream.Seek($offset, [System.IO.SeekOrigin]::Begin)
+                    $buffer = New-Object 'System.Byte[]' ($stream.Length - $offset)
+                    $read = $stream.Read($buffer, 0, $buffer.Length)
+                    $text = ([Text.Encoding]::UTF8).GetString($buffer, 0, $read)
+                }
+            } catch {
+                $text = $null
+            } finally {
+                if ($null -ne $stream) { $stream.Close() }
+            }
+        }
+        if (-not $text) { return $r }
+    } else {
+        $lines = Read-SharedTextLines $log
+        if ($lines.Count -eq 0) { return $r }
+        # 每次重启若密码仍未轮换，SnowLuma 会重新生成一个，取最后一次出现的。
+        $text = ($lines -join "`n")
+    }
+    $matchList = [regex]::Matches($text, 'initial credentials:\s*user=(\S+)\s+password=(\S+)')
+    if ($matchList.Count -gt 0) {
+        $last = $matchList[$matchList.Count - 1]
+        $r['user'] = $last.Groups[1].Value
+        $r['pass'] = $last.Groups[2].Value
+        $r['found'] = $true
+    }
+    return $r
 }
 
 # -----------------------------------------------------------------------------
