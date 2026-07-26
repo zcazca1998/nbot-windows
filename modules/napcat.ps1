@@ -236,6 +236,23 @@ function Install-NapCat {
     Write-TextFile (Join-Path $releaseNew '.image-source') $source
     Move-Item -LiteralPath $releaseNew -Destination $release -Force
 
+    # 5.1 切换载荷前先把旧载荷里的配置收回主目录。NapCat 是在载荷目录里读写
+    #     配置的(WebUI 改的设置、登录态记录、新生成的 token 都写在那儿),
+    #     而载荷会被整个换掉——不先收回来,升级一次就全丢。
+    $oldConfigDir = Join-Path $payload 'current\config'
+    if (Test-Path -LiteralPath $oldConfigDir) {
+        $masterCfgDir = Join-Path $snowRoot 'config'
+        Ensure-Dir $masterCfgDir
+        $harvested = 0
+        Get-ChildItem -Path $oldConfigDir -File -ErrorAction SilentlyContinue | ForEach-Object {
+            Copy-Item -LiteralPath $_.FullName -Destination (Join-Path $masterCfgDir $_.Name) -Force
+            $harvested = $harvested + 1
+        }
+        if ($harvested -gt 0) {
+            Write-Info ('已回收旧载荷中的 ' + $harvested + ' 个配置文件到 ' + $masterCfgDir)
+        }
+    }
+
     # 6. 切换 current junction 并记录状态
     $state = Get-StateDir
     $curFile = Join-Path $state 'payload-current.txt'

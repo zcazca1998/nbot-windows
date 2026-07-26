@@ -27,11 +27,21 @@ if not exist "%LAUNCHER%" (
   exit /b 3
 )
 
-rem Sync the master config (NAPCAT_ROOT\config) into the payload. The payload
-rem directory is replaced on every update; the master copy is the source of
-rem truth for webui.json / onebot11_*.json / napcat.json.
+rem Config lives in two places and must be synced BOTH ways:
+rem   NAPCAT_ROOT\config      persistent master copy, survives updates
+rem   <payload>\current\config  what NapCat actually reads and WRITES
+rem The payload directory is swapped wholesale on every update, so anything
+rem NapCat wrote there (webui.json, onebot11_*.json, napcat_<uin>.json,
+rem passkey.json ...) is lost unless it is harvested back first.
 if not exist "%CURRENT%\config" md "%CURRENT%\config" 2>nul
-copy /y "%NAPCAT_ROOT%\config\*" "%CURRENT%\config\" >nul 2>&1
+
+rem 1) Harvest: pull anything newer from the payload back into the master copy,
+rem    so changes made through NapCat's own WebUI are not thrown away.
+xcopy "%CURRENT%\config\*" "%NAPCAT_ROOT%\config\" /D /Y /I /Q >nul 2>&1
+
+rem 2) Push: master copy wins for files the installer manages, then NapCat
+rem    starts from a complete config set.
+xcopy "%NAPCAT_ROOT%\config\*" "%CURRENT%\config\" /D /Y /I /Q >nul 2>&1
 
 rem Pass the QQ number for quick login when configured (falls back to the
 rem QR code / saved-session login window when absent or not yet logged in).
@@ -40,3 +50,7 @@ if defined QQ_UIN set "LOGIN_ARG=%QQ_UIN%"
 
 cd /d "%CURRENT%"
 call "%NAPCAT_LAUNCH%" %LOGIN_ARG% >> "%LOGFILE%" 2>&1
+
+rem NapCat exited: harvest once more so the last state (new tokens, login
+rem records) lands in the master copy before any future update swaps it out.
+xcopy "%CURRENT%\config\*" "%NAPCAT_ROOT%\config\" /D /Y /I /Q >nul 2>&1
