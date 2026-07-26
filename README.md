@@ -2,6 +2,8 @@
 
 # nbot-windows
 
+[![CI](https://github.com/zcazca1998/nbot-windows/actions/workflows/ci.yml/badge.svg)](https://github.com/zcazca1998/nbot-windows/actions/workflows/ci.yml)
+
 Windows 上的 **AstrBot + NapCat + QQ** 一键部署器，[nbot](https://github.com/zcazca1998/nbot)（Linux 版）的 Windows 移植。
 
 双击一个 exe 走完全程：选安装位置 → 装托管 Python 与 AstrBot → 装 NapCat 与 QQ →

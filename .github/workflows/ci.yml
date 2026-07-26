@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  check:
+    # 项目本身只跑在 Windows 上，检查也必须在 Windows 跑：
+    # 静态检查要用 PSParser，渲染检查要真的建 WinForms 窗口。
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 静态检查（语法 / 纯 ASCII / 禁用的 PS3+ 写法 / 文件清单）
+        shell: powershell
+        run: .\tests\static-check.ps1
+
+      - name: 功能自测（配置读写 / 令牌 / 解压 / 目录展平）
+        shell: powershell
+        run: .\tests\common-check.ps1
+
+      - name: 渲染与状态自检（离屏绘制所有窗口 + 真跑状态刷新）
+        shell: powershell
+        run: .\tests\render-check.ps1
+
+      - name: 打包单文件安装器
+        shell: powershell
+        run: .\build-single-exe.ps1
+
+      - name: 校验产物能解压且与源码一致
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = Join-Path $env:RUNNER_TEMP 'verify'
+          $proc = Start-Process -FilePath .\dist\NBotSetup.exe `
+            -ArgumentList @('/extract', $out) -Wait -PassThru
+          if ($proc.ExitCode -ne 0) { throw "解压失败，退出码 $($proc.ExitCode)" }
+          $count = @(Get-ChildItem $out -Recurse -File).Count
+          Write-Host "解压出 $count 个文件"
+          if ($count -lt 25) { throw "解压文件数异常：$count" }
+          foreach ($f in @('lib\common.ps1', 'gui.ps1', 'wizard.ps1', 'install-core.ps1')) {
+            $a = (Get-FileHash $f).Hash
+            $b = (Get-FileHash (Join-Path $out $f)).Hash
+            if ($a -ne $b) { throw "$f 与源码不一致" }
+          }
+          Write-Host '产物与源码逐字节一致'
+
+      - name: 上传安装器
+        uses: actions/upload-artifact@v4
+        with:
+          name: NBotSetup
+          path: dist/NBotSetup.exe
+          if-no-files-found: error
