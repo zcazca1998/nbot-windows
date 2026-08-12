@@ -36,27 +36,24 @@ function Install-NapCat {
     } else {
         $repo = Get-Cfg 'NAPCAT_REPO'
         if (-not $repo) { $repo = 'NapNeko/NapCatQQ' }
-        $tag = GitHub-LatestTag $repo
-        if (-not $tag) { Die "无法获取 $repo 的最新版本号,请检查网络配置。" }
         $confAsset = Get-Cfg 'NAPCAT_ASSET'
-        $patterns = $null
         if ($confAsset) {
             $patterns = @($confAsset)
         } else {
             # 官方资产名固定为 NapCat.Shell.zip;宽松模式兜底
             $patterns = @('/NapCat\.Shell\.zip$', '(?i)shell.*\.zip$')
         }
-        $url = $null
-        foreach ($pat in $patterns) {
-            $url = GitHub-AssetUrl $repo $pat
-            if ($url) { break }
-        }
+        # 一次拉取 release JSON 同时取 tag 与资产地址(原 GitHub-LatestTag +
+        # GitHub-AssetUrl 各打一次 api.github.com,反复重试易踩 60 次/小时限额)。
+        $release = GitHub-LatestRelease $repo $patterns
+        $tag = $release['tag']
+        $url = $release['asset']
         if (-not $url) {
             Die '未找到 Windows 版 NapCat 发布包,请检查 NAPCAT_REPO / NAPCAT_ASSET 配置,或将 zip 放入 offline\napcat-shell.zip。'
         }
         Write-Info "下载 NapCat $tag ..."
         $zip = Join-Path $payload 'napcat-shell.zip'
-        GitHub-Fetch $url $zip
+        GitHub-Fetch $url $zip -ExpectZip
         $source = $url
     }
     Write-Info '正在解压 NapCat(约 10 秒)...'

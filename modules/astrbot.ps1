@@ -208,7 +208,7 @@ function Install-AstrBot {
         $zip = $offline
     } else {
         $zip = Join-Path $build 'astrbot-src.zip'
-        GitHub-Fetch "https://github.com/$repo/archive/refs/tags/$tag.zip" $zip
+        GitHub-Fetch "https://github.com/$repo/archive/refs/tags/$tag.zip" $zip -ExpectZip
     }
     Expand-Zip $zip $srcDir
     Strip-TopLevel $srcDir

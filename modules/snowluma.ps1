@@ -54,10 +54,7 @@ function Install-SnowLuma {
     } else {
         $repo = Get-Cfg 'SL_REPO'
         if (-not $repo) { $repo = 'SnowLuma/SnowLuma' }
-        $tag = GitHub-LatestTag $repo
-        if (-not $tag) { Die "无法获取 $repo 的最新版本号,请检查网络配置。" }
         $confAsset = Get-Cfg 'SL_ASSET'
-        $patterns = $null
         if ($confAsset) {
             $patterns = @($confAsset)
         } else {
@@ -66,17 +63,16 @@ function Install-SnowLuma {
             # lite 版做兜底（体积小,但要求系统已有 Node 22+)。
             $patterns = @('(?i)win-x64\.zip$', '(?i)win-x64-lite\.zip$', '(?i)win.*\.zip$')
         }
-        $url = $null
-        foreach ($pat in $patterns) {
-            $url = GitHub-AssetUrl $repo $pat
-            if ($url) { break }
-        }
+        # 一次拉取 release JSON 同时取 tag 与资产地址
+        $release = GitHub-LatestRelease $repo $patterns
+        $tag = $release['tag']
+        $url = $release['asset']
         if (-not $url) {
             Die '未找到 Windows 版 SnowLuma 发布包,请检查 SL_REPO / SL_ASSET 配置,或将 zip 放入 offline\snowluma-win.zip。'
         }
         Write-Info "下载 SnowLuma $tag ..."
         $zip = Join-Path $payload 'snowluma-win.zip'
-        GitHub-Fetch $url $zip
+        GitHub-Fetch $url $zip -ExpectZip
         $source = $url
     }
     Write-Info '正在解压 SnowLuma(约 10-30 秒)...'

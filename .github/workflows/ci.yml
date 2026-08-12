@@ -28,6 +28,20 @@ jobs:
         shell: powershell
         run: .\tests\render-check.ps1
 
+      # 离线验证「国内连不上 GitHub」修复：镜像连通性探针、releases HTML 兜底、
+      # ExpectJson/ExpectZip 拦截错误页、file:// 走托管 WebRequest 兜底。
+      # 该用例强制 $script:CurlExe=$null，因此在自带 curl 的 Runner 上也能确定性的
+      # 测到「无 curl（Win7）」那条降级路径。
+      - name: GitHub 下载逻辑离线测试
+        shell: powershell
+        run: .\tests\github-check.ps1
+
+      # 离线验证无人值守：NBOT_ASSUME_DEFAULTS=1 不卡 Read-Host、非交互环境回退默认、
+      # 真实 install-core.ps1 configure 端到端退出 0 并写出配置（NBOT_TEST=1 跳过 Install-Self）。
+      - name: 无人值守命令分发离线测试
+        shell: powershell
+        run: .\tests\unattended-check.ps1
+
       - name: 打包单文件安装器
         shell: powershell
         run: .\build-single-exe.ps1

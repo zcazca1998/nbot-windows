@@ -13,3 +13,9 @@ __pycache__/
 .claude/
 .vscode/
 *.swp
+
+# 测试临时产物（由 tests/*.ps1 运行时生成，不入库）
+tests/.unattended-results.txt
+tests/.log-*.txt
+tests/.diag*.txt
+tests/.unattended-debug.ps1

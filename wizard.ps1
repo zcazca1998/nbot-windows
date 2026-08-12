@@ -37,8 +37,11 @@ $script:ExitCode = 0
 $script:LogEncoding = New-Object System.Text.UTF8Encoding($false)
 
 # 下拉项与实际配置值的对应表
-$script:GhItems = @('gh-proxy.com（推荐）', 'ghfast.top', 'ghproxy.net', '不使用加速（直连）')
-$script:GhValues = @('https://gh-proxy.com', 'https://ghfast.top', 'https://ghproxy.net', '')
+# 首项「自动选最快」对应空字符串:交给 Get-OrderedMirrors 做连通性探针、按
+# 延迟自动挑最快的可用镜像(国内不同网络对各 ghproxy 镜像可用性差异很大,
+# 写死一个容易踩到抽风的那个)。与 lib\common.ps1 的 GITHUB_MIRROR 默认空一致。
+$script:GhItems = @('GitHub 加速（自动选最快，推荐）', 'ghfast.top', 'ghproxy.net', 'ghproxy.com', '不使用加速（直连）')
+$script:GhValues = @('', 'https://ghfast.top', 'https://ghproxy.net', 'https://ghproxy.com', '')
 $script:PipItems = @('清华 TUNA（推荐）', '阿里云', '腾讯云', '中科大 USTC', '华为云', '官方 pypi.org')
 $script:PipValues = @(
     'https://pypi.tuna.tsinghua.edu.cn/simple',
@@ -62,6 +65,36 @@ function Ask-YesNo {
     $answer = [System.Windows.Forms.MessageBox]::Show(
         $Text, 'nbot', [System.Windows.Forms.MessageBoxButtons]::YesNo)
     return ($answer -eq [System.Windows.Forms.DialogResult]::Yes)
+}
+
+function Show-MirrorConnectivity {
+    # 「测试连通性」按钮:清掉探针缓存强制重测,列出各镜像延迟并提示下载将
+    # 按延迟择优;全不可用时提示回退直连/改用代理。直接针对国内连不上 GitHub。
+    $cachePath = Get-MirrorCachePath
+    try { if (Test-Path -LiteralPath $cachePath) { Remove-Item -LiteralPath $cachePath -Force } } catch { }
+    $ordered = Get-OrderedMirrors -MaxKeep 8
+    $lat = @{}
+    if (Test-Path -LiteralPath $cachePath) {
+        foreach ($l in ((Read-TextFile $cachePath) -split "`r?`n")) {
+            if ($l -match '^#') { continue }
+            $parts = $l -split "`t"
+            if ($parts.Count -ge 2) { $lat[$parts[0]] = $parts[1] }
+        }
+    }
+    $lines = @('GitHub 镜像连通性测试结果：', '')
+    if ($lat.Count -gt 0) {
+        foreach ($k in $lat.Keys) {
+            $lines += ('  ✓ ' + $k + '  延迟 ' + $lat[$k] + ' ms')
+        }
+        $lines += ''
+        $lines += '下载将按以上顺序自动选最快的可用镜像；若全不可用则回退直连。'
+    } else {
+        $lines += '  未能连通任何镜像（可能当前无外网，或均被墙）。'
+        $lines += '下载将直接尝试直连 GitHub；建议：'
+        $lines += '  1) 在「网络与端口」改用全局代理后重试；'
+        $lines += '  2) 命令行设置 GITHUB_PROXY 指向可用代理后再装。'
+    }
+    Show-Msg ($lines -join "`n")
 }
 
 function Test-AbsPath {
@@ -288,16 +321,17 @@ $script:TxtRoot.add_TextChanged({ Update-Location })
 $cardNet = New-ThemeCard $script:Page1 20 272 640 232 '网络与端口'
 
 [void](New-ThemeLabel $cardNet 14 36 100 20 'GitHub 加速' 9 'TextDim')
-$script:CmbGh = New-ThemeCombo $cardNet 118 34 250 $script:GhItems 0
+$script:CmbGh = New-ThemeCombo $cardNet 118 34 180 $script:GhItems 0
+[void](New-ThemeButton $cardNet 304 33 76 23 '测试连通性' 'ghost' { Show-MirrorConnectivity })
 
 [void](New-ThemeLabel $cardNet 388 36 80 20 'PyPI 镜像' 9 'TextDim')
 $script:CmbPip = New-ThemeCombo $cardNet 468 34 156 $script:PipItems 0
 
-# 加速说明:默认已选好国内推荐节点,新手直接下一步即可。
+# 加速说明:默认「自动选最快」,会先做连通性探针挑最优镜像节点,新手直接下一步即可。
 # 高度按实测给足:这段在 610px 宽下换成两行,Graphics.MeasureString 量出来
 # 需要 31-32px(随字体而异),原来只给 30px,末行被裁掉一线,看着像字被"卡住"。
-[void](New-ThemeLabel $cardNet 14 60 610 38 ('国内网络请保持上面两个加速（已默认选好）：直连 GitHub 常被重置、直连 PyPI 装依赖很慢。' +
-    '若某个节点抽风,换一个再重试即可；有全局代理/在海外可都选“不使用/官方”。') 8.5 'Warn')
+[void](New-ThemeLabel $cardNet 14 60 610 38 ('GitHub 加速默认「自动选最快」：会先探测各镜像延迟、自动挑可用的，国内直连常被重置时可点右侧「测试连通性」预览。' +
+    'PyPI 同理；若某节点抽风换一个重试即可，有全局代理/在海外可都选“不使用/官方”。') 8.5 'Warn')
 
 # 左列标签给足 124px:'SnowLuma WebUI' 9pt 实测要 113px,110px 的栏位会
 # 换行后被裁成虚点。输入框与第二列相应右移(142 / 232 / 326)。

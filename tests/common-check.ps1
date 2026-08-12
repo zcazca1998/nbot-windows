@@ -321,7 +321,7 @@ try {
 try {
     if (Test-Path -LiteralPath $tmpConfig) { Remove-Item -LiteralPath $tmpConfig -Force }
     if (Test-Path -LiteralPath $tmpWork) { Remove-Item -LiteralPath $tmpWork -Recurse -Force }
-    Remove-Item Env:\NBOT_CONFIG -ErrorAction SilentlyContinue
+    if (Test-Path Env:\NBOT_CONFIG) { Remove-Item Env:\NBOT_CONFIG -ErrorAction SilentlyContinue }
     Pass 'case 7: cleanup temp files'
 } catch {
     Fail 'case 7: cleanup temp files' $_.Exception.Message

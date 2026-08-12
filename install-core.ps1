@@ -147,6 +147,9 @@ function Configure-Base {
 # -----------------------------------------------------------------------------
 
 function Install-Self {
+    # NBOT_TEST=1（测试/离线 smoke）时跳过自拷贝：避免测试把整个项目 robocopy
+    # 到 %ProgramData%\nbot\installer，污染宿主机又拖慢测试。生产路径不受影响。
+    if ($env:NBOT_TEST -eq '1') { return }
     $source = (Get-ScriptRoot).TrimEnd('\')
     $target = (Get-InstallerDir).TrimEnd('\')
     if ($source -eq $target) { return }
@@ -268,6 +271,34 @@ function Invoke-Doctor {
         } else {
             Write-Warn 'QQ_EXE 配置    : 未写入（启动器不知道去哪拉起 QQ，请安装/修复菜单第 4 项）'
         }
+    }
+
+    Write-Bold '-- GitHub 镜像连通性 --'
+    try {
+        # 清掉探针缓存强制重测,让用户看到当前真实可达的镜像与延迟;
+        # 这正是国内「连不上 GitHub」的第一手诊断信息。
+        $cp = Get-MirrorCachePath
+        if (Test-Path -LiteralPath $cp) { Remove-Item -LiteralPath $cp -Force }
+        $ordered = Get-OrderedMirrors -MaxKeep 8
+        $lat = @{}
+        if (Test-Path -LiteralPath $cp) {
+            foreach ($l in ((Read-TextFile $cp) -split "`r?`n")) {
+                if ($l -match '^#') { continue }
+                $parts = $l -split "`t"
+                if ($parts.Count -ge 2) { $lat[$parts[0]] = $parts[1] }
+            }
+        }
+        if ($lat.Count -gt 0) {
+            foreach ($k in $lat.Keys) {
+                Write-Host ($k + ' : 可用，延迟 ' + $lat[$k] + ' ms')
+            }
+            Write-Info '下载将按以上顺序自动选最快的可用镜像；若全部不可用则回退直连。'
+        } else {
+            Write-Warn '所有候选镜像均不可达（可能无外网，或被墙/运营商拦截）。'
+            Write-Warn '下载将尝试直连 GitHub；若仍失败，请配置全局代理（GITHUB_PROXY）或使用 offline\ 离线包。'
+        }
+    } catch {
+        Write-Warn ('镜像连通性检测失败：' + $_.Exception.Message)
     }
 
     Write-Bold '-- 计划任务 --'

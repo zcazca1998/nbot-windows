@@ -158,13 +158,12 @@ function Load-Config {
     $script:Cfg['ONEBOT_HTTP_PORT'] = '3005'
     $script:Cfg['GITHUB_ACCESS'] = 'auto'
     $script:Cfg['GITHUB_PROXY'] = ''
-    # 默认就带一个 ghproxy 风格的加速前缀:国内直连 GitHub Release 经常掉到
-    # 几十 KB/s(实测下 38MB 的包要 20 分钟),让每个用户自己踩一遍再去翻
-    # 文档配置是没道理的。auto 模式下镜像失败会自动回退直连,所以默认配上
-    # 只有好处;不想用就在向导里选「不使用加速」,或设 GITHUB_ACCESS=direct。
-    # 取值与 wizard.ps1 的 $GhValues 首项保持一致,否则命令行安装和图形向导
-    # 安装会拿到不同的默认镜像。
-    $script:Cfg['GITHUB_MIRROR'] = 'https://ghfast.top'
+    # 默认空:不写死单个镜像,交给 Get-OrderedMirrors 在下载前做一次连通性
+    # 探针、按延迟自动选最快的可用镜像(ghfast.top 等仍在候选池首位)。
+    # 好处:国内不同网络对各个 ghproxy 镜像的可用性差异很大,写死一个反而
+    # 容易踩到抽风的那个;空配置 + auto 模式等于「多镜像自动择优」。
+    # 与 wizard.ps1 的 $GhValues 首项(空字符串 = 自动选最快)保持一致。
+    $script:Cfg['GITHUB_MIRROR'] = ''
     $script:Cfg['PIP_INDEX_URL'] = ''
     $script:Cfg['PYTHON_VERSION'] = '3.13.5'
     $script:Cfg['PYTHON_URL'] = ''
@@ -445,14 +444,14 @@ function Download-File {
         if ($Proxy) { $curlArgs += @('-x', $Proxy) }
         $curlArgs += $Url
         & $script:CurlExe @curlArgs
-        if ($LASTEXITCODE -ne 0) {
-            if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force }
-            throw ('curl 下载失败（退出码 ' + $LASTEXITCODE + '）：' + $Url)
+        if ($LASTEXITCODE -eq 0) {
+            return
         }
-        return
-    }
-
-    if ($Proxy -and $Proxy -match '^socks') {
+        # curl 失败(被墙/不支持该协议如 file:// 等)不要立刻放弃——降级到下面的
+        # 托管 WebRequest 通道再试一次,多一层兜底,国内网络波动时更扛造。
+        if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force }
+        Write-Warn ('curl 下载失败（退出码 ' + $LASTEXITCODE + '），改用系统 WebRequest 兜底：' + $Url)
+    } elseif ($Proxy -and $Proxy -match '^socks') {
         Die '配置了 socks 代理，但系统中没有可用的 curl.exe；socks 代理仅在有 curl.exe 时可用。请改用 http/https 代理，或安装 curl。'
     }
 
@@ -466,8 +465,10 @@ function Download-File {
     try {
         if (Test-Path -LiteralPath $part) { Remove-Item -LiteralPath $part -Force }
         $req = [System.Net.WebRequest]::Create($Url)
-        $req.Timeout = 30000
-        $req.ReadWriteTimeout = 60000
+        # Timeout/ReadWriteTimeout 仅 HttpWebRequest 等子类支持;file:// 等其他
+        # 协议返回的请求类型会抛 NotSupportedException,包一层避免殃及整个下载。
+        try { $req.Timeout = 30000 } catch { }
+        try { $req.ReadWriteTimeout = 60000 } catch { }
         try { $req.UserAgent = 'nbot-installer' } catch { }
         if ($Proxy) {
             $req.Proxy = New-Object System.Net.WebProxy($Proxy)
@@ -496,23 +497,243 @@ function Download-File {
     }
 }
 
+function Test-ValidZip {
+    # 下载完成后校验文件确实是 zip(而不是镜像/代理返回的错误 HTML 页)。
+    # 镜像常返回 200 + 错误页,导致 curl 的 --fail 拦不住,后续解压才报一个
+    # 很迷惑的「未找到 launcher」;这里在下载通道内就拦截,触发下一通道重试。
+    # 真正确定性的判据是 ZIP 魔数 PK\x03\x04;MinBytes 仅作极低底线(挡住空响应
+    # /截断的极小文件)。设为 64 字节——远小于任何含内容的合法 zip,避免误杀
+    # 体积不大但合法的包;真正的拦截面是上面的 PK 魔数检查。
+    param($Path, [long]$MinBytes = 64)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        $item = Get-Item -LiteralPath $Path
+        if ($item.Length -lt $MinBytes) { return $false }
+        $stream = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $sig = New-Object 'System.Byte[]' 4
+        $n = $stream.Read($sig, 0, 4)
+        $stream.Close()
+        if ($n -lt 4) { return $false }
+        # ZIP 本地文件头 PK\x03\x04;空归档 PK\x05\x06;跨卷 PK\x07\x08
+        if ($sig[0] -eq 0x50 -and $sig[1] -eq 0x4B -and $sig[3] -eq 0x04 -and ($sig[2] -eq 0x03 -or $sig[2] -eq 0x05 -or $sig[2] -eq 0x07)) {
+            return $true
+        }
+        return $false
+    } catch {
+        return $false
+    }
+}
+
+function Get-MirrorPool {
+    # 候选镜像池:国内访问 GitHub 经常超时/被墙,ghproxy 类镜像能显著提速。
+    # 这份列表只是「候选」——真正下载前会由 Get-OrderedMirrors 做一次连通性
+    # 探针(访问 github.com/favicon.ico),只保留能用的、并按延迟排序,死镜像
+    # 不会拖慢安装。镜像地址可能随时失效,多列几个提高兜底命中率;最终顺序
+    # 由探针延迟决定,这里写的先后只是「偏好」,不影响结果。
+    #
+    # 用户配置(GITHUB_MIRROR)始终排在最前,且不受探针结果影响——那是用户
+    # 自己指定的,必须尊重。
+    $pool = New-Object System.Collections.ArrayList
+    foreach ($m in @(
+        'https://ghfast.top',
+        'https://ghproxy.net',
+        'https://ghproxy.com',
+        'https://mirror.ghproxy.com',
+        'https://gh.api.99988866.xyz',
+        'https://ghproxy.1888866.xyz',
+        'https://ghdl.f4team.xyz',
+        'https://github.moeyy.xyz',
+        'https://ghproxy.ygxz.in',
+        'https://slink.ltd'
+    )) {
+        if (-not $pool.Contains($m)) { [void]$pool.Add($m) }
+    }
+    return $pool.ToArray()
+}
+
+function Get-MirrorList {
+    # 用户配置(GITHUB_MIRROR,支持 ; | , 分隔)放最前,再追加候选池。
+    # 这里不做连通性过滤——过滤交给 Get-OrderedMirrors(带缓存 + 排序)。
+    $cfg = Get-Cfg 'GITHUB_MIRROR'
+    $list = New-Object System.Collections.ArrayList
+    if ($cfg) {
+        foreach ($m in $cfg.Split(@(';', '|', ','), [StringSplitOptions]::RemoveEmptyEntries)) {
+            $m = $m.Trim()
+            if ($m -and -not $list.Contains($m)) { [void]$list.Add($m) }
+        }
+    }
+    foreach ($m in (Get-MirrorPool)) {
+        if (-not $list.Contains($m)) { [void]$list.Add($m) }
+    }
+    return $list.ToArray()
+}
+
+function Get-MirrorCachePath {
+    # 探针结果缓存到一个普通用户可写的位置(ProgramData 需要管理员权限,
+    # 而探针也可能在普通权限下跑,比如面板里点「测试连通性」)。
+    return (Join-Path $env:TEMP 'nbot-mirror-rank.txt')
+}
+
+function Test-LooksLikeJson {
+    # 镜像常返回 200 + HTML 错误页(curl --fail 拦不住),必须拦在通道内,
+    # 否则下游 JSON 解析会拿一段 HTML 去匹配 tag_name 然后 Die。
+    # 轻量判据:非空、且不像 HTML(<html / <!doctype 大小写不敏感)。
+    param($Path)
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
+    try {
+        $item = Get-Item -LiteralPath $Path
+        if ($item.Length -lt 2) { return $false }
+        $stream = New-Object System.IO.FileStream($Path, [System.IO.FileMode]::Open, [System.IO.FileAccess]::Read, [System.IO.FileShare]::ReadWrite)
+        $buf = New-Object 'System.Byte[]' 4096
+        $n = $stream.Read($buf, 0, [math]::Min($buf.Length, $item.Length))
+        $stream.Close()
+        if ($n -le 0) { return $false }
+        $head = ([Text.Encoding]::ASCII).GetString($buf, 0, [math]::Min($n, 512))
+        if ($head -match '(?i)<!doctype|<html') { return $false }
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Test-Mirror {
+    # 探针:经镜像访问 github.com/favicon.ico,连通且返回真图片才算可用。
+    # 返回延迟(毫秒)或 $null(不可用)。超时 6s,不会无限挂。
+    param([string]$Mirror)
+    if (-not $Mirror) { return $null }
+    $url = $Mirror.TrimEnd('/') + '/https://github.com/favicon.ico'
+    $req = $null
+    try {
+        $req = [System.Net.WebRequest]::Create($url)
+        $req.Method = 'GET'
+        $req.Timeout = 6000
+        $req.ReadWriteTimeout = 6000
+        $req.AllowAutoRedirect = $true
+        try { $req.UserAgent = 'nbot-installer' } catch { }
+        $sw = New-Object System.Diagnostics.Stopwatch
+        $sw.Start()
+        $resp = $req.GetResponse()
+        $sw.Stop()
+        $ok = $false
+        try {
+            if ([int]$resp.StatusCode -eq 200) {
+                $ct = $null
+                try { $ct = $resp.ContentType } catch { }
+                if ($null -eq $ct -or $ct -match '(?i)image') { $ok = $true }
+            }
+        } catch { }
+        if ($resp) { try { $resp.Close() } catch { } }
+        if ($ok) { return $sw.ElapsedMilliseconds }
+        return $null
+    } catch {
+        if ($req) { try { $req.Abort() } catch { } }
+        return $null
+    }
+}
+
+function Get-OrderedMirrors {
+    # 返回「经过连通性筛选、按延迟升序」的镜像列表,用户配置永远在最前。
+    # 结果缓存在 $env:TEMP\nbot-mirror-rank.txt(10 分钟内有效),避免每次
+    # 下载都重探;探针本身也有 6s 超时,不会无限挂。
+    # 若全部探针失败,退回未筛选的完整列表(至少还能试,网络也许只是瞬时抖动)。
+    param([int]$MaxKeep = 5)
+    $userMirrors = New-Object System.Collections.ArrayList
+    $cfg = Get-Cfg 'GITHUB_MIRROR'
+    if ($cfg) {
+        foreach ($m in $cfg.Split(@(';', '|', ','), [StringSplitOptions]::RemoveEmptyEntries)) {
+            $m = $m.Trim()
+            if ($m -and -not $userMirrors.Contains($m)) { [void]$userMirrors.Add($m) }
+        }
+    }
+
+    # 读缓存:格式每行 "<url>\t<latencyMs>",只认 10 分钟内的。
+    $cachePath = Get-MirrorCachePath
+    $cached = @{}
+    $cacheFresh = $false
+    if (Test-Path -LiteralPath $cachePath) {
+        try {
+            $lines = (Read-TextFile $cachePath) -split "`r?`n"
+            foreach ($l in $lines) {
+                if ($l -match '^#ts=(\d+)') {
+                    $age = [long]([DateTime]::Now.ToString('yyyyMMddHHmm')) - [long]$Matches[1]
+                    if ($age -ge 0 -and $age -lt 10) { $cacheFresh = $true }
+                }
+                if ($l -match '^#') { continue }
+                $parts = $l -split "`t"
+                if ($parts.Count -ge 2) { $cached[$parts[0]] = [int]$parts[1] }
+            }
+        } catch { $cacheFresh = $false }
+    }
+
+    $pool = Get-MirrorPool
+    $ordered = New-Object System.Collections.ArrayList
+
+    # 1) 用户配置永远优先(不参与延迟排序,尊重用户选择)
+    foreach ($m in $userMirrors) { if (-not $ordered.Contains($m)) { [void]$ordered.Add($m) } }
+
+    # 2) 候选池:缓存新鲜则用缓存延迟;否则从头探针并写回缓存
+    $probed = @{}
+    if (-not $cacheFresh) {
+        foreach ($m in $pool) {
+            $lat = Test-Mirror $m
+            if ($null -ne $lat) { $probed[$m] = $lat }
+        }
+        try {
+            $sb = New-Object System.Text.StringBuilder
+            [void]$sb.AppendLine('# nbot mirror rank cache (ts=' + ([DateTime]::Now.ToString('yyyyMMddHHmm')) + ')')
+            foreach ($kv in $probed.GetEnumerator()) {
+                [void]$sb.AppendLine($kv.Key + "`t" + $kv.Value)
+            }
+            Write-TextFile $cachePath $sb.ToString()
+        } catch { }
+    } else {
+        $probed = $cached
+    }
+
+    # 按延迟升序追加候选池中可用的镜像(限量,避免列表过长)
+    $sorted = @($probed.Keys | Sort-Object { $probed[$_] }) | Select-Object -First $MaxKeep
+    foreach ($m in $sorted) {
+        if (-not $ordered.Contains($m)) { [void]$ordered.Add($m) }
+    }
+    # 兜底:哪怕探针全挂,也把候选池补上,但限量(user 数 + MaxKeep + 2),
+    # 避免完全无网时 GitHub-Fetch 把每个镜像都耗满 20s 连接超时才放弃。
+    if ($ordered.Count -le $userMirrors.Count) {
+        $cap = $userMirrors.Count + $MaxKeep + 2
+        foreach ($m in $pool) {
+            if ($ordered.Count -ge $cap) { break }
+            if (-not $ordered.Contains($m)) { [void]$ordered.Add($m) }
+        }
+    }
+    return $ordered.ToArray()
+}
+
 function GitHub-Fetch {
-    param($Url, $OutFile)
+    param($Url, $OutFile, [switch]$ExpectZip, [switch]$ExpectJson)
     $access = Get-Cfg 'GITHUB_ACCESS'
     if (-not $access) { $access = 'auto' }
-    $mirror = Get-Cfg 'GITHUB_MIRROR'
     $proxy = Get-Cfg 'GITHUB_PROXY'
-    $githubPattern = '^https://(github\.com|raw\.githubusercontent\.com|codeload\.github\.com|objects\.githubusercontent\.com)/'
+    # api.github.com 也纳入镜像范围:国内机器常被墙 API 或踩 60 次/小时限额,
+    # 而 ghproxy 类镜像大多支持代理 api.github.com(https://mirror/https://api...)。
+    $githubPattern = '^https://(github\.com|raw\.githubusercontent\.com|codeload\.github\.com|objects\.githubusercontent\.com|api\.github\.com)/'
 
-    # 1) 镜像通道（镜像不使用代理）
-    if ($mirror -and $Url -match $githubPattern) {
-        $mirrorUrl = $mirror.TrimEnd('/') + '/' + $Url
-        Write-Info ('尝试 GitHub 镜像通道：' + $mirrorUrl)
-        try {
-            Download-File $mirrorUrl $OutFile ''
-            return
-        } catch {
-            Write-Warn ('镜像通道失败：' + $_.Exception.Message)
+    # 1) 镜像通道(经连通性探针筛选、按延迟排序的镜像逐个尝试;镜像不使用代理)
+    if ($Url -match $githubPattern) {
+        foreach ($mirror in (Get-OrderedMirrors)) {
+            $mirrorUrl = $mirror.TrimEnd('/') + '/' + $Url
+            Write-Info ('尝试 GitHub 镜像通道：' + $mirrorUrl)
+            try {
+                Download-File $mirrorUrl $OutFile ''
+                if ($ExpectZip -and -not (Test-ValidZip $OutFile)) {
+                    throw '下载到的不是有效的 zip 包(可能是镜像返回的错误页)'
+                }
+                if ($ExpectJson -and -not (Test-LooksLikeJson $OutFile)) {
+                    throw '下载到的不是有效的 JSON(可能是镜像返回的错误页)'
+                }
+                return
+            } catch {
+                Write-Warn ('镜像通道失败(' + $mirror + ')：' + $_.Exception.Message)
+                if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
+            }
         }
     }
 
@@ -521,9 +742,16 @@ function GitHub-Fetch {
         Write-Info ('尝试通过代理访问 GitHub：' + $Url + '（代理 ' + $proxy + '）')
         try {
             Download-File $Url $OutFile $proxy
+            if ($ExpectZip -and -not (Test-ValidZip $OutFile)) {
+                throw '下载到的不是有效的 zip 包(可能是代理返回的错误页)'
+            }
+            if ($ExpectJson -and -not (Test-LooksLikeJson $OutFile)) {
+                throw '下载到的不是有效的 JSON(可能是代理返回的错误页)'
+            }
             return
         } catch {
             Write-Warn ('代理通道失败：' + $_.Exception.Message)
+            if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
         }
     }
 
@@ -532,9 +760,16 @@ function GitHub-Fetch {
         Write-Info ('尝试直连 GitHub：' + $Url)
         try {
             Download-File $Url $OutFile ''
+            if ($ExpectZip -and -not (Test-ValidZip $OutFile)) {
+                throw '下载到的不是有效的 zip 包(可能是站点返回的错误页)'
+            }
+            if ($ExpectJson -and -not (Test-LooksLikeJson $OutFile)) {
+                throw '下载到的不是有效的 JSON(可能是站点返回的错误页)'
+            }
             return
         } catch {
             Write-Warn ('直连通道失败：' + $_.Exception.Message)
+            if (Test-Path -LiteralPath $OutFile) { Remove-Item -LiteralPath $OutFile -Force -ErrorAction SilentlyContinue }
         }
     }
 
@@ -543,40 +778,167 @@ function GitHub-Fetch {
 
 function GitHub-ApiGet {
     param($Url)
-    # 镜像通道对 api.github.com 不适用；GitHub-Fetch 的镜像正则本身匹配不到
-    # api.github.com，因此这里直接复用其回退逻辑即可。
+    # api.github.com 现在也走镜像通道(GitHub-Fetch 的镜像正则已包含它);
+    # -ExpectJson 确保镜像返回的错误 HTML 页(200)被识别为失败,触发下一个通道,
+    # 而不是直接把 HTML 喂给下游 JSON 解析导致 Die。
     $temp = Join-Path $env:TEMP ('nbot-api-' + [Guid]::NewGuid().ToString('N') + '.json')
     try {
-        GitHub-Fetch $Url $temp
+        GitHub-Fetch $Url $temp -ExpectJson
         return (Read-TextFile $temp)
     } finally {
         if (Test-Path -LiteralPath $temp) { Remove-Item -LiteralPath $temp -Force }
     }
 }
 
-function GitHub-LatestTag {
-    param($Repo)
-    $json = $null
-    try {
-        $json = GitHub-ApiGet ('https://api.github.com/repos/' + $Repo + '/releases/latest')
-    } catch {
-        Die ('获取 ' + $Repo + ' 最新版本失败：' + $_.Exception.Message)
+function Parse-LatestReleaseJson {
+    # 从 GitHub Release API 的 JSON 文本里解析 tag 与资产下载地址。
+    # 抽成纯函数便于离线单元测试(喂 mock JSON)。
+    param([string]$Json, $AssetPatterns)
+    $tag = $null
+    if ($Json -match '"tag_name"\s*:\s*"([^"]+)"') { $tag = $Matches[1] }
+    if (-not $AssetPatterns -or $AssetPatterns.Count -eq 0) {
+        $AssetPatterns = @('/NapCat\.Shell\.zip$', '(?i)shell.*\.zip$')
     }
-    if ($json -match '"tag_name"\s*:\s*"([^"]+)"') {
-        return $Matches[1]
+    $assetUrl = $null
+    $found = [regex]::Matches($Json, '"browser_download_url"\s*:\s*"([^"]+)"')
+    foreach ($pat in $AssetPatterns) {
+        foreach ($match in $found) {
+            $u = $match.Groups[1].Value
+            if ($u -match $pat) { $assetUrl = $u; break }
+        }
+        if ($assetUrl) { break }
     }
-    Die ('无法从 GitHub API 响应中解析 ' + $Repo + ' 的 tag_name。')
+    $r = @{}
+    $r['tag'] = $tag
+    $r['asset'] = $assetUrl
+    return $r
 }
 
-function GitHub-AssetUrl {
-    param($Repo, $Pattern)
-    $json = GitHub-ApiGet ('https://api.github.com/repos/' + $Repo + '/releases/latest')
-    $found = [regex]::Matches($json, '"browser_download_url"\s*:\s*"([^"]+)"')
-    foreach ($match in $found) {
-        $assetUrl = $match.Groups[1].Value
-        if ($assetUrl -match $Pattern) { return $assetUrl }
+function Parse-TagFromRedirectUrl {
+    # releases/latest 会 302 跳转到 .../releases/tag/<TAG>,从跳转后的 URL 取 tag。
+    param([string]$Url)
+    if ($Url -match '/releases/tag/([^/?#]+)') { return $Matches[1] }
+    return $null
+}
+
+function Parse-AssetUrlsFromHtml {
+    # 从 releases 页面 HTML 里抠下载地址(GitHub 页面里用 browser_download_url
+    # 这个 data 属性名)。抽成纯函数便于离线测试。
+    param([string]$Html, $AssetPatterns)
+    if (-not $AssetPatterns -or $AssetPatterns.Count -eq 0) {
+        $AssetPatterns = @('/NapCat\.Shell\.zip$', '(?i)shell.*\.zip$')
+    }
+    $assetUrl = $null
+    $found = [regex]::Matches($Html, 'browser_download_url["'']?\s*[:=]\s*["'']([^"'']+)')
+    if ($found.Count -eq 0) {
+        # 兜底:直接找 /releases/download/<tag>/<file> 形式的链接
+        $found = [regex]::Matches($Html, 'href=["''](/[^"'']*?/releases/download/[^"'']+)["'']')
+    }
+    foreach ($pat in $AssetPatterns) {
+        foreach ($match in $found) {
+            $u = $match.Groups[1].Value
+            if ($u -match $pat) { $assetUrl = $u; break }
+        }
+        if ($assetUrl) { break }
+    }
+    if ($assetUrl -and $assetUrl.StartsWith('/')) {
+        $assetUrl = 'https://github.com' + $assetUrl
+    }
+    return $assetUrl
+}
+
+function Get-RedirectedUrl {
+    # 取 URL 302 跳转后的最终地址(AllowAutoRedirect=false,手动拿 Location)。
+    param([string]$Url)
+    $req = $null
+    try {
+        $req = [System.Net.WebRequest]::Create($Url)
+        $req.Method = 'HEAD'
+        $req.AllowAutoRedirect = $false
+        $req.Timeout = 15000
+        try { $req.UserAgent = 'nbot-installer' } catch { }
+        $resp = $req.GetResponse()
+        $loc = $null
+        try { $loc = $resp.Headers['Location'] } catch { }
+        if ($resp) { try { $resp.Close() } catch { } }
+        if ($loc) { return $loc }
+    } catch {
+        if ($req) { try { $req.Abort() } catch { } }
     }
     return $null
+}
+
+function GitHub-LatestReleaseFromHtml {
+    # API 被墙/触发 60 次/小时限额时的兜底:走 releases 页面(不受 API 限额
+    # 影响,且能通过镜像访问)。先抓 releases/latest 拿 302 跳转里的 tag,
+    # 再抓 expanded_assets 页面解析资产下载地址。
+    param($Repo, $AssetPatterns)
+    $tag = $null
+    $asset = $null
+    $finalUrl = Get-RedirectedUrl ('https://github.com/' + $Repo + '/releases/latest')
+    if ($finalUrl) { $tag = Parse-TagFromRedirectUrl $finalUrl }
+    if (-not $tag) { return $null }
+    try {
+        $expandedUrl = ('https://github.com/' + $Repo + '/releases/expanded_assets/' + $tag)
+        $tempExp = Join-Path $env:TEMP ('nbot-exp-' + [Guid]::NewGuid().ToString('N') + '.html')
+        GitHub-Fetch $expandedUrl $tempExp
+        if (Test-Path -LiteralPath $tempExp) {
+            $html = Read-TextFile $tempExp
+            $asset = Parse-AssetUrlsFromHtml $html $AssetPatterns
+        }
+    } catch { }
+    $r = @{}
+    $r['tag'] = $tag
+    $r['asset'] = $asset
+    return $r
+}
+
+function GitHub-LatestRelease {
+    # 一次拉取 release 元数据:优先 API(镜像/代理/直连),全部失败再退回
+    # releases 页面 HTML 解析(国内机器常被墙 API 或踩 60 次/小时限额)。
+    param($Repo, $AssetPatterns)
+    $tag = $null
+    $asset = $null
+    try {
+        $json = GitHub-ApiGet ('https://api.github.com/repos/' + $Repo + '/releases/latest')
+        $r = Parse-LatestReleaseJson $json $AssetPatterns
+        $tag = $r['tag']
+        $asset = $r['asset']
+    } catch {
+        Write-Warn ('GitHub API 获取 ' + $Repo + ' 失败，改用 releases 页面解析：' + $_.Exception.Message)
+    }
+    if (-not $tag -or -not $asset) {
+        try {
+            $r2 = GitHub-LatestReleaseFromHtml $Repo $AssetPatterns
+            if ($r2) {
+                if (-not $tag) { $tag = $r2['tag'] }
+                if (-not $asset) { $asset = $r2['asset'] }
+            }
+        } catch {
+            Write-Warn ('releases 页面解析也失败：' + $_.Exception.Message)
+        }
+    }
+    if (-not $tag) { Die ('无法获取 ' + $Repo + ' 的最新版本(tag)。') }
+    if (-not $asset) { Die ('无法获取 ' + $Repo + ' 的适用资产下载地址(资产名不匹配)。') }
+    $r = @{}
+    $r['tag'] = $tag
+    $r['asset'] = $asset
+    return $r
+}
+
+function GitHub-LatestTag {
+    # 兼容旧调用方:只取 tag,同样享受「API + releases 页面」双层兜底。
+    param($Repo)
+    try {
+        $json = GitHub-ApiGet ('https://api.github.com/repos/' + $Repo + '/releases/latest')
+        if ($json -match '"tag_name"\s*:\s*"([^"]+)"') { return $Matches[1] }
+    } catch { }
+    $finalUrl = Get-RedirectedUrl ('https://github.com/' + $Repo + '/releases/latest')
+    if ($finalUrl) {
+        $tag = Parse-TagFromRedirectUrl $finalUrl
+        if ($tag) { return $tag }
+    }
+    Die ('无法获取 ' + $Repo + ' 的最新版本(tag)。')
 }
 
 # -----------------------------------------------------------------------------
