@@ -207,20 +207,28 @@ qqlogin
 - 远程服务器请使用 RDP 远程桌面登录后扫码，无需安装任何远程画面组件。
 - NapCat+QQ 计划任务在「用户登录桌面时」触发：QQ 是 GUI 程序，无法在 SYSTEM 服务 / Session 0 中运行。
 - 无人值守服务器需要设置 Windows 自动登录：运行 netplwiz，取消勾选「要使用本计算机，用户必须输入用户名和密码」，输入一次密码保存；重启后系统自动登录桌面，NapCat+QQ 随之自动启动。
+- **无人值守安装**（v1.6.1+）：设置环境变量 `NBOT_ASSUME_DEFAULTS=1` 后运行 `install.bat install-all`，所有交互提示自动采用默认值，不卡 `Read-Host`；非交互环境（无终端）也会安全回退默认值而非挂死。适用于自动化部署 / Ansible / SCCM 等场景。
 - 注意：RDP 断开时保持会话（不要注销），注销会结束桌面会话并终止 QQ。
 
 ## 下载策略
 
 GitHub 支持三种模式（GITHUB_ACCESS）：
 
-- auto：按「镜像 → 代理 → 直连」顺序回退。
-- proxy：仅使用代理。
-- direct：仅直连。
+- **auto**（默认）：自动探针选最快镜像，按「用户配置镜像 → 探针排序后的可用镜像 → 代理 → 直连」顺序回退；首次使用时自动探测各镜像延迟并缓存 10 分钟，后续复用缓存结果。
+- **proxy**：仅使用代理。
+- **direct**：仅直连。
+
+国内网络优化（v1.6.1+）：
+
+- `api.github.com` 已纳入镜像通道，版本号与资产地址的元数据获取也能走加速镜像（此前只有文件下载走镜像，元数据 API 被墙或限流时会直接卡死）。
+- 当 API 被墙或踩到 60 次/小时限额时，自动降级到 GitHub Releases 页面 HTML 解析（302 跳转取 tag + expanded_assets 页面抠资产地址），不受 API 限额影响。
+- 镜像常返回 `200 + HTML 错误页`（如 Cloudflare 拦截页），下载后用 JSON/ZIP 格式校验拦截，自动切换下一个通道重试，不会把错误页当合法内容处理。
+- 安装向导的 GitHub 加速下拉默认为**「自动选最快（推荐）」**，旁边有「测试连通性」按钮可实时查看各镜像延迟。
 
 相关配置项：
 
 - GITHUB_PROXY：http/https 代理均可；socks5h 代理仅在系统带 curl.exe 时可用（Win10 1803+ 自带）。
-- GITHUB_MIRROR：ghproxy 风格加速前缀，例如 https://ghfast.top。
+- GITHUB_MIRROR：ghproxy 风格加速前缀；留空（默认）则启用自动探针选最快；设为具体 URL 则固定使用该镜像。
 - PIP_INDEX_URL：PyPI 镜像，国内建议 https://pypi.tuna.tsinghua.edu.cn/simple。
 - NAPCAT_REPO / NAPCAT_ASSET / NAPCAT_LAUNCH：NapCat 的 Release 仓库（默认 NapNeko/NapCatQQ，资产 NapCat.Shell.zip）、zip 资产名正则、包内入口（默认 launcher-win10.bat，与 launcher.bat 等价但提权回退不依赖 Windows Terminal）。
 - SL_REPO / SL_ASSET / SL_LAUNCH / SL_NODE：SnowLuma 的 Release 仓库（默认 SnowLuma/SnowLuma，win-x64 完整版优先、lite 兜底）、资产名正则、包内入口（默认 launcher.bat）、包内 Node 可执行名（默认 node.exe，lite 包回落系统 Node 22+）。
