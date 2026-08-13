@@ -612,7 +612,16 @@ function Test-Mirror {
         try { $req.UserAgent = 'nbot-installer' } catch { }
         $sw = New-Object System.Diagnostics.Stopwatch
         $sw.Start()
-        $resp = $req.GetResponse()
+        # 异步发起 + 硬超时等待:WebRequest.Timeout 只限制「连接建立后」的读阶段,
+        # 框不到 DNS 解析;国内解析 github 镜像常挂 10~30s。改用 BeginGetResponse
+        # 的等待句柄把「整次请求(含 DNS)」一起框进 6s,单次探针绝不会远超超时。
+        $ar = $req.BeginGetResponse($null, $null)
+        if (-not $ar.AsyncWaitHandle.WaitOne(6000)) {
+            $sw.Stop()
+            try { $req.Abort() } catch { }
+            return $null
+        }
+        $resp = $req.EndGetResponse($ar)
         $sw.Stop()
         $ok = $false
         try {

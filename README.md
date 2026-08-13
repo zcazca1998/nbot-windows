@@ -2,7 +2,7 @@
 
 # nbot-windows
 
-> **当前版本：v1.6.2**（[Releases](https://github.com/zcazca1998/nbot-windows/releases/tag/v1.6.2)）
+> **当前版本：v1.6.3**（[Releases](https://github.com/zcazca1998/nbot-windows/releases/tag/v1.6.3)）
 
 [![CI](https://github.com/zcazca1998/nbot-windows/actions/workflows/ci.yml/badge.svg)](https://github.com/zcazca1998/nbot-windows/actions/workflows/ci.yml)
 

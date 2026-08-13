@@ -70,12 +70,55 @@ function Ask-YesNo {
 function Show-MirrorConnectivity {
     # 「测试连通性」按钮:清掉探针缓存强制重测,列出各镜像延迟并提示下载将
     # 按延迟择优;全不可用时提示回退直连/改用代理。直接针对国内连不上 GitHub。
+    # 改为后台 Runspace + Timer 轮询:串行探针可能连数十秒(单次含 DNS 可达数秒),
+    # 若同步跑在 UI 线程会把整个向导窗口冻住,表现为「一点就卡」。
     $cachePath = Get-MirrorCachePath
     try { if (Test-Path -LiteralPath $cachePath) { Remove-Item -LiteralPath $cachePath -Force } } catch { }
-    $ordered = Get-OrderedMirrors -MaxKeep 8
+
+    $btn = $script:BtnTestMirror
+    if ($btn) { $btn.Enabled = $false; $btn.Text = '测试中…' }
+
+    $commonPs1 = (Join-Path $script:WizDir 'lib\common.ps1')
+    $rs = [System.Management.Automation.Runspaces.RunspaceFactory]::CreateRunspace()
+    $rs.Open()
+    $ps = [System.Management.Automation.PowerShell]::Create()
+    $ps.Runspace = $rs
+    [void]$ps.AddScript(". '$commonPs1'; Get-OrderedMirrors -MaxKeep 8")
+    $handle = $ps.BeginInvoke()
+
+    # 用脚本作用域持有,防止 Timer/Runspace 被 GC 回收导致 Tick 永不触发。
+    $script:_ProbeRs = $rs
+    $script:_ProbePs = $ps
+    $script:_ProbeHandle = $handle
+    $script:_ProbeStart = [DateTime]::Now
+    $script:_ProbeBtn = $btn
+    $script:_ProbeCache = $cachePath
+
+    $script:_ProbeTimer = New-Object Windows.Forms.Timer
+    $script:_ProbeTimer.Interval = 150
+    $script:_ProbeTimer.add_Tick({
+        if ($script:_ProbeHandle.IsCompleted) {
+            $script:_ProbeTimer.Stop()
+            try { $script:_ProbePs.EndInvoke($script:_ProbeHandle) | Out-Null } catch { }
+            _ProbeShowResult $script:_ProbeCache $false
+            _ProbeCleanup
+        } elseif ((([DateTime]::Now - $script:_ProbeStart).TotalSeconds) -gt 75) {
+            # 兜底硬超时:每个探针已框进 6s,8 个最多 ~50s,这里再留余量,
+            # 防止任何意外把 UI 永久冻在一个没有结果的按钮上。
+            $script:_ProbeTimer.Stop()
+            try { $script:_ProbePs.Stop() } catch { }
+            _ProbeShowResult $script:_ProbeCache $true
+            _ProbeCleanup
+        }
+    })
+    $script:_ProbeTimer.Start()
+}
+
+function _ProbeShowResult {
+    param($CachePath, [bool]$TimedOut)
     $lat = @{}
-    if (Test-Path -LiteralPath $cachePath) {
-        foreach ($l in ((Read-TextFile $cachePath) -split "`r?`n")) {
+    if (Test-Path -LiteralPath $CachePath) {
+        foreach ($l in ((Read-TextFile $CachePath) -split "`r?`n")) {
             if ($l -match '^#') { continue }
             $parts = $l -split "`t"
             if ($parts.Count -ge 2) { $lat[$parts[0]] = $parts[1] }
@@ -94,7 +137,17 @@ function Show-MirrorConnectivity {
         $lines += '  1) 在「网络与端口」改用全局代理后重试；'
         $lines += '  2) 命令行设置 GITHUB_PROXY 指向可用代理后再装。'
     }
+    if ($TimedOut) { $lines += ''; $lines += '（测试超过 75s 仍未结束，已强制结束，结果可能不全。）' }
     Show-Msg ($lines -join "`n")
+}
+
+function _ProbeCleanup {
+    if ($script:_ProbeBtn) { $script:_ProbeBtn.Enabled = $true; $script:_ProbeBtn.Text = '测试连通性' }
+    try { if ($script:_ProbePs) { $script:_ProbePs.Dispose() } } catch { }
+    try { if ($script:_ProbeRs) { $script:_ProbeRs.Close() } } catch { }
+    try { if ($script:_ProbeTimer) { $script:_ProbeTimer.Dispose() } } catch { }
+    $script:_ProbeRs = $null; $script:_ProbePs = $null; $script:_ProbeHandle = $null
+    $script:_ProbeTimer = $null; $script:_ProbeBtn = $null; $script:_ProbeCache = $null
 }
 
 function Test-AbsPath {
@@ -322,7 +375,7 @@ $cardNet = New-ThemeCard $script:Page1 20 272 640 232 '网络与端口'
 
 [void](New-ThemeLabel $cardNet 14 36 100 20 'GitHub 加速' 9 'TextDim')
 $script:CmbGh = New-ThemeCombo $cardNet 118 34 180 $script:GhItems 0
-[void](New-ThemeButton $cardNet 304 33 76 23 '测试连通性' 'ghost' { Show-MirrorConnectivity })
+$script:BtnTestMirror = New-ThemeButton $cardNet 304 33 76 23 '测试连通性' 'ghost' { Show-MirrorConnectivity }
 
 [void](New-ThemeLabel $cardNet 388 36 80 20 'PyPI 镜像' 9 'TextDim')
 $script:CmbPip = New-ThemeCombo $cardNet 468 34 156 $script:PipItems 0
