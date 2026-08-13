@@ -32,7 +32,7 @@ Win7 SP1 与 Win8 见文末[说明](#windows-78-特别说明)。
 powershell -NoProfile -ExecutionPolicy Bypass -File build-single-exe.ps1
 ~~~
 
-产物在 `dist\NBotSetup.exe`，约 80 KB，不依赖任何第三方打包工具。
+产物在 `dist\NBotSetup.exe`，约 150 KB，不依赖任何第三方打包工具。
 
 装好后从桌面「nbot 面板」进入日常管理，或在新开的终端里用 `nbot` 命令。
 
@@ -207,7 +207,7 @@ qqlogin
 - 远程服务器请使用 RDP 远程桌面登录后扫码，无需安装任何远程画面组件。
 - NapCat+QQ 计划任务在「用户登录桌面时」触发：QQ 是 GUI 程序，无法在 SYSTEM 服务 / Session 0 中运行。
 - 无人值守服务器需要设置 Windows 自动登录：运行 netplwiz，取消勾选「要使用本计算机，用户必须输入用户名和密码」，输入一次密码保存；重启后系统自动登录桌面，NapCat+QQ 随之自动启动。
-- **无人值守安装**（v1.6.1+）：设置环境变量 `NBOT_ASSUME_DEFAULTS=1` 后运行 `install.bat install-all`，所有交互提示自动采用默认值，不卡 `Read-Host`；非交互环境（无终端）也会安全回退默认值而非挂死。适用于自动化部署 / Ansible / SCCM 等场景。
+- **无人值守安装**（v1.6.1+）：设置环境变量 `NBOT_ASSUME_DEFAULTS=1`（或 `NBOT_NONINTERACTIVE=1`、CI 环境 `CI=true`）后运行 `install.bat install-all`，所有交互提示自动采用默认值，不卡 `Read-Host`；非交互环境（无终端、Read-Host 抛异常）也会安全回退默认值而非挂死。适用于自动化部署 / Ansible / SCCM / CI 等场景。
 - 注意：RDP 断开时保持会话（不要注销），注销会结束桌面会话并终止 QQ。
 
 ## 下载策略

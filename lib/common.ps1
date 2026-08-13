@@ -1361,10 +1361,20 @@ function Get-SnowlumaCred {
 # 交互
 # -----------------------------------------------------------------------------
 
+function Test-Unattended {
+    # 无人值守判定:CI 环境、或显式设置假设默认值/非交互标志时,所有交互提示
+    # 都直接取默认值,避免在没有终端的上下文里 Read-Host 卡死(CI runners 可能
+    # 提供伪终端但不会有人按键,一旦 Read-Host 不抛异常就会挂住整条安装流水线)。
+    if ($env:NBOT_ASSUME_DEFAULTS -eq '1') { return $true }
+    if ($env:NBOT_NONINTERACTIVE -eq '1') { return $true }
+    if ($env:CI -eq 'true' -or $env:CI -eq 'True') { return $true }
+    return $false
+}
+
 function Prompt-Default {
     param($Message, $Default)
     # 与 Confirm-Action 同理:无人值守/非交互环境直接采用默认值,不挂死。
-    if ($env:NBOT_ASSUME_DEFAULTS -eq '1') {
+    if (Test-Unattended) {
         Write-Info ($Message + ' -> 无人值守,采用默认值 [' + $Default + ']')
         return $Default
     }
@@ -1383,10 +1393,10 @@ function Prompt-Default {
 
 function Confirm-Action {
     param($Message, $DefaultYes)
-    # 无人值守(NBOT_ASSUME_DEFAULTS=1,或 -NonInteractive 下 Read-Host 抛异常)
-    # 一律走默认值并把选择写进日志——交互提示在没人的控制台上会永远等下去,
-    # 整条安装流水线跟着挂死,而且没有任何报错。
-    if ($env:NBOT_ASSUME_DEFAULTS -eq '1') {
+    # 无人值守(NBOT_ASSUME_DEFAULTS=1 / NBOT_NONINTERACTIVE=1 / CI=true,或
+    # -NonInteractive 下 Read-Host 抛异常)一律走默认值并把选择写进日志——交互
+    # 提示在没人的控制台上会永远等下去,整条安装流水线跟着挂死,而且没有任何报错。
+    if (Test-Unattended) {
         if ($DefaultYes) { $pick = 'Y' } else { $pick = 'N' }
         Write-Info ($Message + ' -> 无人值守,自动选择默认值 ' + $pick)
         return [bool]$DefaultYes

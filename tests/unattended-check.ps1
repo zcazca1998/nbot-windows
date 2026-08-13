@@ -49,6 +49,26 @@ try {
     $d = Confirm-Action '确认?' $false
     if ($d -eq $false) { Write-Result '[OK] B: 非交互环境下 Confirm-Action 回退默认值 $false' }
     else { $script:failCount++; Write-Result '[FAIL] B: Confirm-Action 未回退 $false' }
+
+    # D) CI=true 环境变量也应触发无人值守(不依赖 Read-Host 抛异常,避免伪终端下挂死)
+    $env:CI = 'true'
+    $e = Prompt-Default 'CI端口' '8080'
+    if ($e -ceq '8080') { Write-Result '[OK] D: CI=true 时 Prompt-Default 直接采用默认值' }
+    else { $script:failCount++; Write-Result ('[FAIL] D: Prompt-Default 返回了 ' + $e) }
+    $f = Confirm-Action 'CI确认?' $true
+    if ($f -eq $true) { Write-Result '[OK] D: CI=true 时 Confirm-Action 直接返回 $true' }
+    else { $script:failCount++; Write-Result '[FAIL] D: Confirm-Action 未返回 $true' }
+    $env:CI = ''
+
+    # E) NBOT_NONINTERACTIVE=1 也应触发无人值守
+    $env:NBOT_NONINTERACTIVE = '1'
+    $g = Prompt-Default 'NI端口' '9090'
+    if ($g -ceq '9090') { Write-Result '[OK] E: NBOT_NONINTERACTIVE=1 时 Prompt-Default 直接采用默认值' }
+    else { $script:failCount++; Write-Result ('[FAIL] E: Prompt-Default 返回了 ' + $g) }
+    $h = Confirm-Action 'NI确认?' $false
+    if ($h -eq $false) { Write-Result '[OK] E: NBOT_NONINTERACTIVE=1 时 Confirm-Action 直接返回 $false' }
+    else { $script:failCount++; Write-Result '[FAIL] E: Confirm-Action 未返回 $false' }
+    $env:NBOT_NONINTERACTIVE = ''
 } catch {
     $script:failCount++
     Write-Result ('[FAIL] A/B 机制测试异常: ' + $_.Exception.Message)
